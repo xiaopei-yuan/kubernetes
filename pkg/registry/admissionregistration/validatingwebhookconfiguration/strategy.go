@@ -37,7 +37,7 @@ type validatingWebhookConfigurationStrategy struct {
 // Strategy is the default logic that applies when creating and updating validatingWebhookConfiguration objects.
 var Strategy = validatingWebhookConfigurationStrategy{legacyscheme.Scheme, names.SimpleNameGenerator}
 
-// NamespaceScoped returns true because all validatingWebhookConfiguration' need to be within a namespace.
+// NamespaceScoped returns false because ValidatingWebhookConfiguration is cluster-scoped resource.
 func (validatingWebhookConfigurationStrategy) NamespaceScoped() bool {
 	return false
 }
@@ -66,11 +66,16 @@ func (validatingWebhookConfigurationStrategy) Validate(ctx context.Context, obj 
 	return validation.ValidateValidatingWebhookConfiguration(obj.(*admissionregistration.ValidatingWebhookConfiguration))
 }
 
+// WarningsOnCreate returns warnings for the creation of the given object.
+func (validatingWebhookConfigurationStrategy) WarningsOnCreate(ctx context.Context, obj runtime.Object) []string {
+	return nil
+}
+
 // Canonicalize normalizes the object after validation.
 func (validatingWebhookConfigurationStrategy) Canonicalize(obj runtime.Object) {
 }
 
-// AllowCreateOnUpdate is true for validatingWebhookConfiguration; this means you may create one with a PUT request.
+// AllowCreateOnUpdate is false for validatingWebhookConfiguration; this means you may not create one with a PUT request.
 func (validatingWebhookConfigurationStrategy) AllowCreateOnUpdate() bool {
 	return false
 }
@@ -78,6 +83,11 @@ func (validatingWebhookConfigurationStrategy) AllowCreateOnUpdate() bool {
 // ValidateUpdate is the default update validation for an end user.
 func (validatingWebhookConfigurationStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidateValidatingWebhookConfigurationUpdate(obj.(*admissionregistration.ValidatingWebhookConfiguration), old.(*admissionregistration.ValidatingWebhookConfiguration))
+}
+
+// WarningsOnUpdate returns warnings for the given update.
+func (validatingWebhookConfigurationStrategy) WarningsOnUpdate(ctx context.Context, obj, old runtime.Object) []string {
+	return nil
 }
 
 // AllowUnconditionalUpdate is the default update policy for validatingWebhookConfiguration objects. Status update should

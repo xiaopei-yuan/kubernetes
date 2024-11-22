@@ -26,6 +26,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,18 +34,18 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
+	"k8s.io/apimachinery/pkg/util/wait"
 	auditinternal "k8s.io/apiserver/pkg/apis/audit"
 	auditv1 "k8s.io/apiserver/pkg/apis/audit/v1"
-	auditv1beta1 "k8s.io/apiserver/pkg/apis/audit/v1beta1"
 	"k8s.io/apiserver/pkg/audit"
-	"k8s.io/client-go/tools/clientcmd/api/v1"
+	v1 "k8s.io/client-go/tools/clientcmd/api/v1"
 )
 
 // newWebhookHandler returns a handler which receives webhook events and decodes the
 // request body. The caller passes a callback which is called on each webhook POST.
 // The object passed to cb is of the same type as list.
 func newWebhookHandler(t *testing.T, list runtime.Object, cb func(events runtime.Object)) http.Handler {
-	s := json.NewSerializer(json.DefaultMetaFactory, audit.Scheme, audit.Scheme, false)
+	s := json.NewSerializerWithOptions(json.DefaultMetaFactory, audit.Scheme, audit.Scheme, json.SerializerOptions{})
 	return &testWebhookHandler{
 		t:          t,
 		list:       list,
@@ -106,14 +107,20 @@ func newWebhook(t *testing.T, endpoint string, groupVersion schema.GroupVersion)
 	// NOTE(ericchiang): Do we need to use a proper serializer?
 	require.NoError(t, stdjson.NewEncoder(f).Encode(config), "writing kubeconfig")
 
-	b, err := NewBackend(f.Name(), groupVersion, DefaultInitialBackoff)
+	retryBackoff := wait.Backoff{
+		Duration: 500 * time.Millisecond,
+		Factor:   1.5,
+		Jitter:   0.2,
+		Steps:    5,
+	}
+	b, err := NewBackend(f.Name(), groupVersion, retryBackoff, nil)
 	require.NoError(t, err, "initializing backend")
 
 	return b.(*backend)
 }
 
 func TestWebhook(t *testing.T) {
-	versions := []schema.GroupVersion{auditv1.SchemeGroupVersion, auditv1beta1.SchemeGroupVersion}
+	versions := []schema.GroupVersion{auditv1.SchemeGroupVersion}
 	for _, version := range versions {
 		gotEvents := false
 
@@ -126,7 +133,7 @@ func TestWebhook(t *testing.T) {
 
 		// Ensure this doesn't return a serialization error.
 		event := &auditinternal.Event{}
-		require.NoError(t, backend.processEvents(event), fmt.Sprintf("failed to send events, apiVersion: %s", version))
-		require.True(t, gotEvents, fmt.Sprintf("no events received, apiVersion: %s", version))
+		require.NoErrorf(t, backend.processEvents(event), "failed to send events, apiVersion: %s", version)
+		require.Truef(t, gotEvents, "no events received, apiVersion: %s", version)
 	}
 }

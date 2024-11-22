@@ -17,62 +17,24 @@ limitations under the License.
 package prober
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	containertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	"k8s.io/kubernetes/pkg/kubelet/prober/results"
+	"k8s.io/kubernetes/pkg/kubelet/util/ioutils"
 	"k8s.io/kubernetes/pkg/probe"
 	execprobe "k8s.io/kubernetes/pkg/probe/exec"
 )
-
-func TestFormatURL(t *testing.T) {
-	testCases := []struct {
-		scheme string
-		host   string
-		port   int
-		path   string
-		result string
-	}{
-		{"http", "localhost", 93, "", "http://localhost:93"},
-		{"https", "localhost", 93, "/path", "https://localhost:93/path"},
-		{"http", "localhost", 93, "?foo", "http://localhost:93?foo"},
-		{"https", "localhost", 93, "/path?bar", "https://localhost:93/path?bar"},
-	}
-	for _, test := range testCases {
-		url := formatURL(test.scheme, test.host, test.port, test.path)
-		if url.String() != test.result {
-			t.Errorf("Expected %s, got %s", test.result, url.String())
-		}
-	}
-}
-
-func TestFindPortByName(t *testing.T) {
-	container := v1.Container{
-		Ports: []v1.ContainerPort{
-			{
-				Name:          "foo",
-				ContainerPort: 8080,
-			},
-			{
-				Name:          "bar",
-				ContainerPort: 9000,
-			},
-		},
-	}
-	want := 8080
-	got, err := findPortByName(container, "foo")
-	if got != want || err != nil {
-		t.Errorf("Expected %v, got %v, err: %v", want, got, err)
-	}
-}
 
 func TestGetURLParts(t *testing.T) {
 	testCases := []struct {
@@ -82,14 +44,14 @@ func TestGetURLParts(t *testing.T) {
 		port  int
 		path  string
 	}{
-		{&v1.HTTPGetAction{Host: "", Port: intstr.FromInt(-1), Path: ""}, false, "", -1, ""},
+		{&v1.HTTPGetAction{Host: "", Port: intstr.FromInt32(-1), Path: ""}, false, "", -1, ""},
 		{&v1.HTTPGetAction{Host: "", Port: intstr.FromString(""), Path: ""}, false, "", -1, ""},
 		{&v1.HTTPGetAction{Host: "", Port: intstr.FromString("-1"), Path: ""}, false, "", -1, ""},
 		{&v1.HTTPGetAction{Host: "", Port: intstr.FromString("not-found"), Path: ""}, false, "", -1, ""},
 		{&v1.HTTPGetAction{Host: "", Port: intstr.FromString("found"), Path: ""}, true, "127.0.0.1", 93, ""},
-		{&v1.HTTPGetAction{Host: "", Port: intstr.FromInt(76), Path: ""}, true, "127.0.0.1", 76, ""},
+		{&v1.HTTPGetAction{Host: "", Port: intstr.FromInt32(76), Path: ""}, true, "127.0.0.1", 76, ""},
 		{&v1.HTTPGetAction{Host: "", Port: intstr.FromString("118"), Path: ""}, true, "127.0.0.1", 118, ""},
-		{&v1.HTTPGetAction{Host: "hostname", Port: intstr.FromInt(76), Path: "path"}, true, "hostname", 76, "path"},
+		{&v1.HTTPGetAction{Host: "hostname", Port: intstr.FromInt32(76), Path: "path"}, true, "hostname", 76, "path"},
 	}
 
 	for _, test := range testCases {
@@ -97,7 +59,7 @@ func TestGetURLParts(t *testing.T) {
 		container := v1.Container{
 			Ports: []v1.ContainerPort{{Name: "found", ContainerPort: 93}},
 			LivenessProbe: &v1.Probe{
-				Handler: v1.Handler{
+				ProbeHandler: v1.ProbeHandler{
 					HTTPGet: test.probe,
 				},
 			},
@@ -111,7 +73,7 @@ func TestGetURLParts(t *testing.T) {
 		if host == "" {
 			host = state.PodIP
 		}
-		port, err := extractPort(test.probe.Port, container)
+		port, err := probe.ResolveContainerPort(test.probe.Port, &container)
 		if test.ok && err != nil {
 			t.Errorf("Unexpected error: %v", err)
 		}
@@ -136,12 +98,12 @@ func TestGetTCPAddrParts(t *testing.T) {
 		host  string
 		port  int
 	}{
-		{&v1.TCPSocketAction{Port: intstr.FromInt(-1)}, false, "", -1},
+		{&v1.TCPSocketAction{Port: intstr.FromInt32(-1)}, false, "", -1},
 		{&v1.TCPSocketAction{Port: intstr.FromString("")}, false, "", -1},
 		{&v1.TCPSocketAction{Port: intstr.FromString("-1")}, false, "", -1},
 		{&v1.TCPSocketAction{Port: intstr.FromString("not-found")}, false, "", -1},
 		{&v1.TCPSocketAction{Port: intstr.FromString("found")}, true, "1.2.3.4", 93},
-		{&v1.TCPSocketAction{Port: intstr.FromInt(76)}, true, "1.2.3.4", 76},
+		{&v1.TCPSocketAction{Port: intstr.FromInt32(76)}, true, "1.2.3.4", 76},
 		{&v1.TCPSocketAction{Port: intstr.FromString("118")}, true, "1.2.3.4", 118},
 	}
 
@@ -150,12 +112,12 @@ func TestGetTCPAddrParts(t *testing.T) {
 		container := v1.Container{
 			Ports: []v1.ContainerPort{{Name: "found", ContainerPort: 93}},
 			LivenessProbe: &v1.Probe{
-				Handler: v1.Handler{
+				ProbeHandler: v1.ProbeHandler{
 					TCPSocket: test.probe,
 				},
 			},
 		}
-		port, err := extractPort(test.probe.Port, container)
+		port, err := probe.ResolveContainerPort(test.probe.Port, &container)
 		if !test.ok && err == nil {
 			t.Errorf("Expected error for %+v, got %s:%d", test, host, port)
 		}
@@ -170,38 +132,12 @@ func TestGetTCPAddrParts(t *testing.T) {
 	}
 }
 
-func TestHTTPHeaders(t *testing.T) {
-	testCases := []struct {
-		input  []v1.HTTPHeader
-		output http.Header
-	}{
-		{[]v1.HTTPHeader{}, http.Header{}},
-		{[]v1.HTTPHeader{
-			{Name: "X-Muffins-Or-Cupcakes", Value: "Muffins"},
-		}, http.Header{"X-Muffins-Or-Cupcakes": {"Muffins"}}},
-		{[]v1.HTTPHeader{
-			{Name: "X-Muffins-Or-Cupcakes", Value: "Muffins"},
-			{Name: "X-Muffins-Or-Plumcakes", Value: "Muffins!"},
-		}, http.Header{"X-Muffins-Or-Cupcakes": {"Muffins"},
-			"X-Muffins-Or-Plumcakes": {"Muffins!"}}},
-		{[]v1.HTTPHeader{
-			{Name: "X-Muffins-Or-Cupcakes", Value: "Muffins"},
-			{Name: "X-Muffins-Or-Cupcakes", Value: "Cupcakes, too"},
-		}, http.Header{"X-Muffins-Or-Cupcakes": {"Muffins", "Cupcakes, too"}}},
-	}
-	for _, test := range testCases {
-		headers := buildHeader(test.input)
-		if !reflect.DeepEqual(test.output, headers) {
-			t.Errorf("Expected %#v, got %#v", test.output, headers)
-		}
-	}
-}
-
 func TestProbe(t *testing.T) {
+	ctx := context.Background()
 	containerID := kubecontainer.ContainerID{Type: "test", ID: "foobar"}
 
 	execProbe := &v1.Probe{
-		Handler: v1.Handler{
+		ProbeHandler: v1.ProbeHandler{
 			Exec: &v1.ExecAction{},
 		},
 	}
@@ -252,7 +188,7 @@ func TestProbe(t *testing.T) {
 		},
 		{ // Probe arguments are passed through
 			probe: &v1.Probe{
-				Handler: v1.Handler{
+				ProbeHandler: v1.ProbeHandler{
 					Exec: &v1.ExecAction{
 						Command: []string{"/bin/bash", "-c", "some script"},
 					},
@@ -264,7 +200,7 @@ func TestProbe(t *testing.T) {
 		},
 		{ // Probe arguments are passed through
 			probe: &v1.Probe{
-				Handler: v1.Handler{
+				ProbeHandler: v1.ProbeHandler{
 					Exec: &v1.ExecAction{
 						Command: []string{"/bin/bash", "-c", "some $(A) $(B)"},
 					},
@@ -280,10 +216,9 @@ func TestProbe(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		for _, probeType := range [...]probeType{liveness, readiness} {
+		for _, probeType := range [...]probeType{liveness, readiness, startup} {
 			prober := &prober{
-				refManager: kubecontainer.NewRefManager(),
-				recorder:   &record.FakeRecorder{},
+				recorder: &record.FakeRecorder{},
 			}
 			testID := fmt.Sprintf("%d-%s", i, probeType)
 			testContainer := v1.Container{Env: test.env}
@@ -292,6 +227,8 @@ func TestProbe(t *testing.T) {
 				testContainer.LivenessProbe = test.probe
 			case readiness:
 				testContainer.ReadinessProbe = test.probe
+			case startup:
+				testContainer.StartupProbe = test.probe
 			}
 			if test.execError {
 				prober.exec = fakeExecProber{test.execResult, errors.New("exec error")}
@@ -299,7 +236,7 @@ func TestProbe(t *testing.T) {
 				prober.exec = fakeExecProber{test.execResult, nil}
 			}
 
-			result, err := prober.probe(probeType, &v1.Pod{}, v1.PodStatus{}, testContainer, containerID)
+			result, err := prober.probe(ctx, probeType, &v1.Pod{}, v1.PodStatus{}, testContainer, containerID)
 			if test.expectError && err == nil {
 				t.Errorf("[%s] Expected probe error but no error was returned.", testID)
 			}
@@ -313,7 +250,7 @@ func TestProbe(t *testing.T) {
 			if len(test.expectCommand) > 0 {
 				prober.exec = execprobe.New()
 				prober.runner = &containertest.FakeContainerCommandRunner{}
-				_, err := prober.probe(probeType, &v1.Pod{}, v1.PodStatus{}, testContainer, containerID)
+				_, err := prober.probe(ctx, probeType, &v1.Pod{}, v1.PodStatus{}, testContainer, containerID)
 				if err != nil {
 					t.Errorf("[%s] Didn't expect probe error but got: %v", testID, err)
 					continue
@@ -327,23 +264,39 @@ func TestProbe(t *testing.T) {
 }
 
 func TestNewExecInContainer(t *testing.T) {
+	ctx := context.Background()
+	limit := 1024
+	tenKilobyte := strings.Repeat("logs-123", 128*10)
+
 	tests := []struct {
-		name string
-		err  error
+		name     string
+		stdout   string
+		expected string
+		err      error
 	}{
 		{
-			name: "no error",
-			err:  nil,
+			name:     "no error",
+			stdout:   "foo",
+			expected: "foo",
+			err:      nil,
 		},
 		{
-			name: "error - make sure we get output",
-			err:  errors.New("bad"),
+			name:     "no error",
+			stdout:   tenKilobyte,
+			expected: tenKilobyte[0:limit],
+			err:      nil,
+		},
+		{
+			name:     "error - make sure we get output",
+			stdout:   "foo",
+			expected: "foo",
+			err:      errors.New("bad"),
 		},
 	}
 
 	for _, test := range tests {
 		runner := &containertest.FakeContainerCommandRunner{
-			Stdout: "foo",
+			Stdout: test.stdout,
 			Err:    test.err,
 		}
 		prober := &prober{
@@ -353,17 +306,26 @@ func TestNewExecInContainer(t *testing.T) {
 		container := v1.Container{}
 		containerID := kubecontainer.ContainerID{Type: "docker", ID: "containerID"}
 		cmd := []string{"/foo", "bar"}
-		exec := prober.newExecInContainer(container, containerID, cmd, 0)
+		exec := prober.newExecInContainer(ctx, container, containerID, cmd, 0)
 
-		actualOutput, err := exec.CombinedOutput()
+		var dataBuffer bytes.Buffer
+		writer := ioutils.LimitWriter(&dataBuffer, int64(limit))
+		exec.SetStderr(writer)
+		exec.SetStdout(writer)
+		err := exec.Start()
+		if err == nil {
+			err = exec.Wait()
+		}
+		actualOutput := dataBuffer.Bytes()
+
 		if e, a := containerID, runner.ContainerID; e != a {
 			t.Errorf("%s: container id: expected %v, got %v", test.name, e, a)
 		}
 		if e, a := cmd, runner.Cmd; !reflect.DeepEqual(e, a) {
 			t.Errorf("%s: cmd: expected %v, got %v", test.name, e, a)
 		}
-		// this isn't 100% foolproof as a bug in a real ContainerCommandRunner where it fails to copy to stdout/stderr wouldn't be caught by this test
-		if e, a := "foo", string(actualOutput); e != a {
+		// this isn't 100% foolproof as a bug in a real CommandRunner where it fails to copy to stdout/stderr wouldn't be caught by this test
+		if e, a := test.expected, string(actualOutput); e != a {
 			t.Errorf("%s: output: expected %q, got %q", test.name, e, a)
 		}
 		if e, a := fmt.Sprintf("%v", test.err), fmt.Sprintf("%v", err); e != a {

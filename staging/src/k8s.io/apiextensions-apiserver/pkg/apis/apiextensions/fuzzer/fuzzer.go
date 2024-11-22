@@ -46,6 +46,10 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 			if len(obj.Names.ListKind) == 0 && len(obj.Names.Kind) > 0 {
 				obj.Names.ListKind = obj.Names.Kind + "List"
 			}
+			if len(obj.Versions) == 0 && len(obj.Version) == 0 {
+				// internal object must have a version to roundtrip all fields
+				obj.Version = "v1"
+			}
 			if len(obj.Versions) == 0 && len(obj.Version) != 0 {
 				obj.Versions = []apiextensions.CustomResourceDefinitionVersion{
 					{
@@ -62,6 +66,7 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 					{Name: "Age", Type: "date", Description: swaggerMetadataDescriptions["creationTimestamp"], JSONPath: ".metadata.creationTimestamp"},
 				}
 			}
+			c.Fuzz(&obj.SelectableFields)
 			if obj.Conversion == nil {
 				obj.Conversion = &apiextensions.CustomResourceConversion{
 					Strategy: apiextensions.NoneConverter,
@@ -72,6 +77,27 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 			}
 			if obj.PreserveUnknownFields == nil {
 				obj.PreserveUnknownFields = pointer.BoolPtr(true)
+			}
+
+			// Move per-version schema, subresources, additionalPrinterColumns, selectableFields to the top-level.
+			// This is required by validation in v1beta1, and by round-tripping in v1.
+			if len(obj.Versions) == 1 {
+				if obj.Versions[0].Schema != nil {
+					obj.Validation = obj.Versions[0].Schema
+					obj.Versions[0].Schema = nil
+				}
+				if obj.Versions[0].AdditionalPrinterColumns != nil {
+					obj.AdditionalPrinterColumns = obj.Versions[0].AdditionalPrinterColumns
+					obj.Versions[0].AdditionalPrinterColumns = nil
+				}
+				if obj.Versions[0].SelectableFields != nil {
+					obj.SelectableFields = obj.Versions[0].SelectableFields
+					obj.Versions[0].SelectableFields = nil
+				}
+				if obj.Versions[0].Subresources != nil {
+					obj.Subresources = obj.Versions[0].Subresources
+					obj.Versions[0].Subresources = nil
+				}
 			}
 		},
 		func(obj *apiextensions.CustomResourceDefinition, c fuzz.Continue) {
@@ -97,7 +123,7 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 				default:
 					isValue := true
 					switch field.Type.Kind() {
-					case reflect.Interface, reflect.Map, reflect.Slice, reflect.Ptr:
+					case reflect.Interface, reflect.Map, reflect.Slice, reflect.Pointer:
 						isValue = false
 					}
 					if isValue || c.Intn(10) == 0 {
@@ -122,6 +148,9 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 			}
 			if len(obj.Type) == 0 {
 				obj.Nullable = false // because this does not roundtrip through go-openapi
+			}
+			if obj.XIntOrString {
+				obj.Type = ""
 			}
 		},
 		func(obj *apiextensions.JSONSchemaPropsOrBool, c fuzz.Continue) {
@@ -156,6 +185,12 @@ func Funcs(codecs runtimeserializer.CodecFactory) []interface{} {
 		func(obj *int64, c fuzz.Continue) {
 			// JSON only supports 53 bits because everything is a float
 			*obj = int64(c.Uint64()) & ((int64(1) << 53) - 1)
+		},
+		func(obj *apiextensions.ValidationRule, c fuzz.Continue) {
+			c.FuzzNoCustom(obj)
+			if obj.Reason != nil && *(obj.Reason) == "" {
+				obj.Reason = nil
+			}
 		},
 	}
 }

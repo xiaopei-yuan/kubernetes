@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 /*
@@ -19,49 +20,21 @@ limitations under the License.
 package preflight
 
 import (
-	"os/user"
-
 	"github.com/pkg/errors"
+	"golang.org/x/sys/windows"
 )
-
-// The "Well-known SID" of Administrator group
-// https://support.microsoft.com/en-us/help/243330/well-known-security-identifiers-in-windows-operating-systems
-const administratorSID = "S-1-5-32-544"
 
 // Check validates if a user has elevated (administrator) privileges.
 func (ipuc IsPrivilegedUserCheck) Check() (warnings, errorList []error) {
-	errorList = []error{}
-
-	currUser, err := user.Current()
-	if err != nil {
-		errorList = append(errorList, errors.New("cannot get current user"))
-		return nil, errorList
+	hProcessToken := windows.GetCurrentProcessToken()
+	if hProcessToken.IsElevated() {
+		return nil, nil
 	}
-
-	groupIds, err := currUser.GroupIds()
-	if err != nil {
-		errorList = append(errorList, errors.New("cannot get group IDs for current user"))
-		return nil, errorList
-	}
-
-	for _, sid := range groupIds {
-		if sid == administratorSID {
-			return nil, errorList
-		}
-	}
-
-	errorList = append(errorList, errors.New("user is not running as administrator"))
-	return nil, errorList
+	return nil, []error{errors.New("the kubeadm process must be run by a user with elevated privileges")}
 }
 
-// Check validates if Docker is setup to use systemd as the cgroup driver.
+// Check number of memory required by kubeadm
 // No-op for Windows.
-func (idsc IsDockerSystemdCheck) Check() (warnings, errorList []error) {
-	return nil, nil
-}
-
-// Check determines if IPVS proxier can be used or not
-// No-op for Windows.
-func (ipvspc IPVSProxierCheck) Check() (warnings, errors []error) {
+func (mc MemCheck) Check() (warnings, errorList []error) {
 	return nil, nil
 }

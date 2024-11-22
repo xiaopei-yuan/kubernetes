@@ -21,22 +21,23 @@ import (
 	"testing"
 
 	apps "k8s.io/api/apps/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/klog/v2/ktesting"
 	"k8s.io/kubernetes/pkg/controller"
 )
 
 func TestScaleDownOldReplicaSets(t *testing.T) {
 	tests := []struct {
-		oldRSSizes []int
+		oldRSSizes []int32
 		d          *apps.Deployment
 	}{
 		{
-			oldRSSizes: []int{3},
+			oldRSSizes: []int32{3},
 			d:          newDeployment("foo", 3, nil, nil, nil, map[string]string{"foo": "bar"}),
 		},
 	}
@@ -65,13 +66,14 @@ func TestScaleDownOldReplicaSets(t *testing.T) {
 
 		kc := fake.NewSimpleClientset(expected...)
 		informers := informers.NewSharedInformerFactory(kc, controller.NoResyncPeriodFunc())
-		c, err := NewDeploymentController(informers.Apps().V1().Deployments(), informers.Apps().V1().ReplicaSets(), informers.Core().V1().Pods(), kc)
+		_, ctx := ktesting.NewTestContext(t)
+		c, err := NewDeploymentController(ctx, informers.Apps().V1().Deployments(), informers.Apps().V1().ReplicaSets(), informers.Core().V1().Pods(), kc)
 		if err != nil {
 			t.Fatalf("error creating Deployment controller: %v", err)
 		}
 		c.eventRecorder = &record.FakeRecorder{}
 
-		c.scaleDownOldReplicaSetsForRecreate(oldRSs, test.d)
+		c.scaleDownOldReplicaSetsForRecreate(ctx, oldRSs, test.d)
 		for j := range oldRSs {
 			rs := oldRSs[j]
 
@@ -88,7 +90,7 @@ func TestOldPodsRunning(t *testing.T) {
 
 		newRS  *apps.ReplicaSet
 		oldRSs []*apps.ReplicaSet
-		podMap map[types.UID]*v1.PodList
+		podMap map[types.UID][]*v1.Pod
 
 		hasOldPodsRunning bool
 	}{
@@ -115,18 +117,16 @@ func TestOldPodsRunning(t *testing.T) {
 		{
 			name:   "old RSs with zero status replicas but pods in terminal state are present",
 			oldRSs: []*apps.ReplicaSet{newRSWithStatus("rs-1", 0, 0, nil)},
-			podMap: map[types.UID]*v1.PodList{
+			podMap: map[types.UID][]*v1.Pod{
 				"uid-1": {
-					Items: []v1.Pod{
-						{
-							Status: v1.PodStatus{
-								Phase: v1.PodFailed,
-							},
+					{
+						Status: v1.PodStatus{
+							Phase: v1.PodFailed,
 						},
-						{
-							Status: v1.PodStatus{
-								Phase: v1.PodSucceeded,
-							},
+					},
+					{
+						Status: v1.PodStatus{
+							Phase: v1.PodSucceeded,
 						},
 					},
 				},
@@ -136,13 +136,11 @@ func TestOldPodsRunning(t *testing.T) {
 		{
 			name:   "old RSs with zero status replicas but pod in unknown phase present",
 			oldRSs: []*apps.ReplicaSet{newRSWithStatus("rs-1", 0, 0, nil)},
-			podMap: map[types.UID]*v1.PodList{
+			podMap: map[types.UID][]*v1.Pod{
 				"uid-1": {
-					Items: []v1.Pod{
-						{
-							Status: v1.PodStatus{
-								Phase: v1.PodUnknown,
-							},
+					{
+						Status: v1.PodStatus{
+							Phase: v1.PodUnknown,
 						},
 					},
 				},
@@ -152,13 +150,11 @@ func TestOldPodsRunning(t *testing.T) {
 		{
 			name:   "old RSs with zero status replicas with pending pod present",
 			oldRSs: []*apps.ReplicaSet{newRSWithStatus("rs-1", 0, 0, nil)},
-			podMap: map[types.UID]*v1.PodList{
+			podMap: map[types.UID][]*v1.Pod{
 				"uid-1": {
-					Items: []v1.Pod{
-						{
-							Status: v1.PodStatus{
-								Phase: v1.PodPending,
-							},
+					{
+						Status: v1.PodStatus{
+							Phase: v1.PodPending,
 						},
 					},
 				},
@@ -168,13 +164,11 @@ func TestOldPodsRunning(t *testing.T) {
 		{
 			name:   "old RSs with zero status replicas with running pod present",
 			oldRSs: []*apps.ReplicaSet{newRSWithStatus("rs-1", 0, 0, nil)},
-			podMap: map[types.UID]*v1.PodList{
+			podMap: map[types.UID][]*v1.Pod{
 				"uid-1": {
-					Items: []v1.Pod{
-						{
-							Status: v1.PodStatus{
-								Phase: v1.PodRunning,
-							},
+					{
+						Status: v1.PodStatus{
+							Phase: v1.PodRunning,
 						},
 					},
 				},
@@ -184,30 +178,24 @@ func TestOldPodsRunning(t *testing.T) {
 		{
 			name:   "old RSs with zero status replicas but pods in terminal state and pending are present",
 			oldRSs: []*apps.ReplicaSet{newRSWithStatus("rs-1", 0, 0, nil)},
-			podMap: map[types.UID]*v1.PodList{
+			podMap: map[types.UID][]*v1.Pod{
 				"uid-1": {
-					Items: []v1.Pod{
-						{
-							Status: v1.PodStatus{
-								Phase: v1.PodFailed,
-							},
+					{
+						Status: v1.PodStatus{
+							Phase: v1.PodFailed,
 						},
-						{
-							Status: v1.PodStatus{
-								Phase: v1.PodSucceeded,
-							},
+					},
+					{
+						Status: v1.PodStatus{
+							Phase: v1.PodSucceeded,
 						},
 					},
 				},
-				"uid-2": {
-					Items: []v1.Pod{},
-				},
+				"uid-2": {},
 				"uid-3": {
-					Items: []v1.Pod{
-						{
-							Status: v1.PodStatus{
-								Phase: v1.PodPending,
-							},
+					{
+						Status: v1.PodStatus{
+							Phase: v1.PodPending,
 						},
 					},
 				},
@@ -232,14 +220,12 @@ func rsWithUID(uid string) *apps.ReplicaSet {
 	return rs
 }
 
-func podMapWithUIDs(uids []string) map[types.UID]*v1.PodList {
-	podMap := make(map[types.UID]*v1.PodList)
+func podMapWithUIDs(uids []string) map[types.UID][]*v1.Pod {
+	podMap := make(map[types.UID][]*v1.Pod)
 	for _, uid := range uids {
-		podMap[types.UID(uid)] = &v1.PodList{
-			Items: []v1.Pod{
-				{ /* supposedly a pod */ },
-				{ /* supposedly another pod pod */ },
-			},
+		podMap[types.UID(uid)] = []*v1.Pod{
+			{ /* supposedly a pod */ },
+			{ /* supposedly another pod pod */ },
 		}
 	}
 	return podMap

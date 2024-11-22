@@ -20,27 +20,29 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
-	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/networking"
 )
 
 func newIngress() networking.Ingress {
-	defaultBackend := networking.IngressBackend{
-		ServiceName: "default-backend",
-		ServicePort: intstr.FromInt(80),
+	serviceBackend := &networking.IngressServiceBackend{
+		Name: "default-backend",
+		Port: networking.ServiceBackendPort{
+			Name:   "",
+			Number: 80,
+		},
 	}
+	defaultBackend := networking.IngressBackend{
+		Service: serviceBackend.DeepCopy(),
+	}
+	implementationPathType := networking.PathTypeImplementationSpecific
 	return networking.Ingress{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "foo",
 			Namespace: metav1.NamespaceDefault,
 		},
 		Spec: networking.IngressSpec{
-			Backend: &networking.IngressBackend{
-				ServiceName: "default-backend",
-				ServicePort: intstr.FromInt(80),
-			},
+			DefaultBackend: defaultBackend.DeepCopy(),
 			Rules: []networking.IngressRule{
 				{
 					Host: "foo.bar.com",
@@ -48,8 +50,9 @@ func newIngress() networking.Ingress {
 						HTTP: &networking.HTTPIngressRuleValue{
 							Paths: []networking.HTTPIngressPath{
 								{
-									Path:    "/foo",
-									Backend: defaultBackend,
+									Path:     "/foo",
+									PathType: &implementationPathType,
+									Backend:  *defaultBackend.DeepCopy(),
 								},
 							},
 						},
@@ -58,8 +61,8 @@ func newIngress() networking.Ingress {
 			},
 		},
 		Status: networking.IngressStatus{
-			LoadBalancer: api.LoadBalancerStatus{
-				Ingress: []api.LoadBalancerIngress{
+			LoadBalancer: networking.IngressLoadBalancerStatus{
+				Ingress: []networking.IngressLoadBalancerIngress{
 					{IP: "127.0.0.1"},
 				},
 			},
@@ -69,6 +72,11 @@ func newIngress() networking.Ingress {
 
 func TestIngressStrategy(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
+	apiRequest := genericapirequest.RequestInfo{APIGroup: "networking.k8s.io",
+		APIVersion: "v1",
+		Resource:   "ingresses",
+	}
+	ctx = genericapirequest.WithRequestInfo(ctx, &apiRequest)
 	if !Strategy.NamespaceScoped() {
 		t.Errorf("Ingress must be namespace scoped")
 	}
@@ -110,10 +118,10 @@ func TestIngressStatusStrategy(t *testing.T) {
 	newIngress := newIngress()
 	oldIngress.ResourceVersion = "4"
 	newIngress.ResourceVersion = "4"
-	newIngress.Spec.Backend.ServiceName = "ignore"
+	newIngress.Spec.DefaultBackend.Service.Name = "ignore"
 	newIngress.Status = networking.IngressStatus{
-		LoadBalancer: api.LoadBalancerStatus{
-			Ingress: []api.LoadBalancerIngress{
+		LoadBalancer: networking.IngressLoadBalancerStatus{
+			Ingress: []networking.IngressLoadBalancerIngress{
 				{IP: "127.0.0.2"},
 			},
 		},
@@ -122,7 +130,7 @@ func TestIngressStatusStrategy(t *testing.T) {
 	if newIngress.Status.LoadBalancer.Ingress[0].IP != "127.0.0.2" {
 		t.Errorf("Ingress status updates should allow change of status fields")
 	}
-	if newIngress.Spec.Backend.ServiceName != "default-backend" {
+	if newIngress.Spec.DefaultBackend.Service.Name != "default-backend" {
 		t.Errorf("PrepareForUpdate should have preserved old spec")
 	}
 	errs := StatusStrategy.ValidateUpdate(ctx, &newIngress, &oldIngress)

@@ -18,7 +18,7 @@ package util
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -28,23 +28,30 @@ import (
 
 	netutil "k8s.io/apimachinery/pkg/util/net"
 	versionutil "k8s.io/apimachinery/pkg/util/version"
-	"k8s.io/klog"
+	pkgversion "k8s.io/component-base/version"
+	"k8s.io/klog/v2"
+
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
-	pkgversion "k8s.io/kubernetes/pkg/version"
 )
 
 const (
-	getReleaseVersionTimeout = time.Duration(10 * time.Second)
+	getReleaseVersionTimeout = 10 * time.Second
 )
 
 var (
 	kubeReleaseBucketURL  = "https://dl.k8s.io"
-	kubeReleaseRegex      = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-0-9a-zA-Z_\.+]*)?$`)
-	kubeReleaseLabelRegex = regexp.MustCompile(`^[[:lower:]]+(-[-\w_\.]+)?$`)
-	kubeBucketPrefixes    = regexp.MustCompile(`^((release|ci|ci-cross)/)?([-\w_\.+]+)$`)
+	kubeCIBucketURL       = "https://storage.googleapis.com/k8s-release-dev"
+	kubeReleaseRegex      = regexp.MustCompile(`^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)([-\w.+]*)?$`)
+	kubeReleaseLabelRegex = regexp.MustCompile(`^((latest|stable)+(-[1-9](\.[1-9](\d)?)?)?)\z`)
+	kubeBucketPrefixes    = regexp.MustCompile(`^((release|ci)/)?([-\w.+]+)$`)
 )
 
-// KubernetesReleaseVersion is helper function that can fetch
+// KubernetesReleaseVersion during unit tests equals kubernetesReleaseVersionTest
+// and returns a static placeholder version. When not running in unit tests
+// it equals kubernetesReleaseVersionDefault.
+var KubernetesReleaseVersion = kubernetesReleaseVersionDefault
+
+// kubernetesReleaseVersionDefault is helper function that can fetch
 // available version information from release servers based on
 // label names, like "stable" or "latest".
 //
@@ -55,13 +62,21 @@ var (
 // servers and then return actual semantic version.
 //
 // Available names on release servers:
-//  stable      (latest stable release)
-//  stable-1    (latest stable release in 1.x)
-//  stable-1.0  (and similarly 1.1, 1.2, 1.3, ...)
-//  latest      (latest release, including alpha/beta)
-//  latest-1    (latest release in 1.x, including alpha/beta)
-//  latest-1.0  (and similarly 1.1, 1.2, 1.3, ...)
-func KubernetesReleaseVersion(version string) (string, error) {
+//
+//	stable      (latest stable release)
+//	stable-1    (latest stable release in 1.x)
+//	stable-1.0  (and similarly 1.1, 1.2, 1.3, ...)
+//	latest      (latest release, including alpha/beta)
+//	latest-1    (latest release in 1.x, including alpha/beta)
+//	latest-1.0  (and similarly 1.1, 1.2, 1.3, ...)
+func kubernetesReleaseVersionDefault(version string) (string, error) {
+	return kubernetesReleaseVersion(version, fetchFromURL)
+}
+
+// kubernetesReleaseVersion is a helper function to fetch
+// available version information. Used for testing to eliminate
+// the need for internet calls.
+func kubernetesReleaseVersion(version string, fetcher func(string, time.Duration) (string, error)) (string, error) {
 	ver := normalizedBuildVersion(version)
 	if len(ver) != 0 {
 		return ver, nil
@@ -87,28 +102,24 @@ func KubernetesReleaseVersion(version string) (string, error) {
 		clientVersion, clientVersionErr := kubeadmVersion(pkgversion.Get().String())
 		// Fetch version from the internet.
 		url := fmt.Sprintf("%s/%s.txt", bucketURL, versionLabel)
-		body, err := fetchFromURL(url, getReleaseVersionTimeout)
+		body, err := fetcher(url, getReleaseVersionTimeout)
 		if err != nil {
-			// If the network operaton was successful but the server did not reply with StatusOK
-			if body != "" {
-				return "", err
-			}
 			if clientVersionErr == nil {
 				// Handle air-gapped environments by falling back to the client version.
 				klog.Warningf("could not fetch a Kubernetes version from the internet: %v", err)
 				klog.Warningf("falling back to the local client version: %s", clientVersion)
-				return KubernetesReleaseVersion(clientVersion)
+				return kubernetesReleaseVersion(clientVersion, fetcher)
 			}
 		}
 
 		if clientVersionErr != nil {
 			if err != nil {
 				klog.Warningf("could not obtain neither client nor remote version; fall back to: %s", constants.CurrentKubernetesVersion)
-				return KubernetesReleaseVersion(constants.CurrentKubernetesVersion.String())
+				return kubernetesReleaseVersion(constants.CurrentKubernetesVersion.String(), fetcher)
 			}
 
 			klog.Warningf("could not obtain client version; using remote version: %s", body)
-			return KubernetesReleaseVersion(body)
+			return kubernetesReleaseVersion(body, fetcher)
 		}
 
 		// both the client and the remote version are obtained; validate them and pick a stable version
@@ -117,7 +128,7 @@ func KubernetesReleaseVersion(version string) (string, error) {
 			return "", err
 		}
 		// Re-validate received version and return.
-		return KubernetesReleaseVersion(body)
+		return kubernetesReleaseVersion(body, fetcher)
 	}
 	return "", errors.Errorf("version %q doesn't match patterns for neither semantic version nor labels (stable, latest, ...)", version)
 }
@@ -129,7 +140,7 @@ func KubernetesReleaseVersion(version string) (string, error) {
 // Current usage is for CI images where all of symbols except '+' are valid,
 // but function is for generic usage where input can't be always pre-validated.
 func KubernetesVersionToImageTag(version string) string {
-	allowed := regexp.MustCompile(`[^-a-zA-Z0-9_\.]`)
+	allowed := regexp.MustCompile(`[^-\w.]`)
 	return allowed.ReplaceAllString(version, "_")
 }
 
@@ -157,7 +168,7 @@ func normalizedBuildVersion(version string) string {
 // Internal helper: split version parts,
 // Return base URL and cleaned-up version
 func splitVersion(version string) (string, string, error) {
-	var urlSuffix string
+	var bucketURL, urlSuffix string
 	subs := kubeBucketPrefixes.FindAllStringSubmatch(version, 1)
 	if len(subs) != 1 || len(subs[0]) != 4 {
 		return "", "", errors.Errorf("invalid version %q", version)
@@ -167,10 +178,12 @@ func splitVersion(version string) (string, string, error) {
 	case strings.HasPrefix(subs[0][2], "ci"):
 		// Just use whichever the user specified
 		urlSuffix = subs[0][2]
+		bucketURL = kubeCIBucketURL
 	default:
 		urlSuffix = "release"
+		bucketURL = kubeReleaseBucketURL
 	}
-	url := fmt.Sprintf("%s/%s", kubeReleaseBucketURL, urlSuffix)
+	url := fmt.Sprintf("%s/%s", bucketURL, urlSuffix)
 	return url, subs[0][3], nil
 }
 
@@ -183,7 +196,7 @@ func fetchFromURL(url string, timeout time.Duration) (string, error) {
 		return "", errors.Errorf("unable to get URL %q: %s", url, err.Error())
 	}
 	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", errors.Errorf("unable to read content of URL %q: %s", url, err.Error())
 	}

@@ -18,12 +18,17 @@ package dynamic
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -32,6 +37,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer/streaming"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+	clientfeatures "k8s.io/client-go/features"
+	clientfeaturestesting "k8s.io/client-go/features/testing"
 	restclient "k8s.io/client-go/rest"
 	restclientwatch "k8s.io/client-go/rest/watch"
 )
@@ -56,6 +63,12 @@ func getObject(version, kind, name string) *unstructured.Unstructured {
 			},
 		},
 	}
+}
+
+func getObjectFromJSON(b []byte) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	_ = obj.UnmarshalJSON(b) // can ignore parse error because the comparison will fail
+	return obj
 }
 
 func getClientServer(h func(http.ResponseWriter, *http.Request)) (Interface, *httptest.Server, error) {
@@ -134,7 +147,7 @@ func TestList(t *testing.T) {
 		}
 		defer srv.Close()
 
-		got, err := cl.Resource(resource).Namespace(tc.namespace).List(metav1.ListOptions{})
+		got, err := cl.Resource(resource).Namespace(tc.namespace).List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			t.Errorf("unexpected error when listing %q: %v", tc.name, err)
 			continue
@@ -143,6 +156,179 @@ func TestList(t *testing.T) {
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("List(%q) want: %v\ngot: %v", tc.name, tc.want, got)
 		}
+	}
+}
+
+func TestWatchList(t *testing.T) {
+	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, true)
+
+	type requestParam struct {
+		Path  string
+		Query string
+	}
+
+	scenarios := []struct {
+		name          string
+		namespace     string
+		watchResponse []watch.Event
+		listResponse  []byte
+
+		expectedRequestParams []requestParam
+		expectedList          *unstructured.UnstructuredList
+	}{
+		{
+			name: "watch-list request for cluster wide resource",
+			watchResponse: []watch.Event{
+				{Type: watch.Added, Object: getObject("gtest/vTest", "rTest", "item1")},
+				{Type: watch.Added, Object: getObject("gtest/vTest", "rTest", "item2")},
+				{Type: watch.Bookmark, Object: func() runtime.Object {
+					obj := getObject("gtest/vTest", "rTest", "item2")
+					obj.SetResourceVersion("10")
+					obj.SetAnnotations(map[string]string{
+						metav1.InitialEventsAnnotationKey:              "true",
+						metav1.InitialEventsListBlueprintAnnotationKey: base64.StdEncoding.EncodeToString(getJSON("vTest", "rTests", "")),
+					})
+					return obj
+				}()},
+			},
+			expectedRequestParams: []requestParam{
+				{
+					Path:  "/apis/gtest/vtest/rtest",
+					Query: "allowWatchBookmarks=true&resourceVersionMatch=NotOlderThan&sendInitialEvents=true&watch=true",
+				},
+			},
+			expectedList: &unstructured.UnstructuredList{
+				Object: map[string]interface{}{
+					"apiVersion": "vTest",
+					"kind":       "rTests",
+					"metadata": map[string]interface{}{
+						"name":            "",
+						"resourceVersion": "10",
+					},
+				},
+				Items: []unstructured.Unstructured{
+					*getObject("gtest/vTest", "rTest", "item1"),
+					*getObject("gtest/vTest", "rTest", "item2"),
+				},
+			},
+		},
+		{
+			name:      "watch-list request for namespaced watch resource",
+			namespace: "nstest",
+			watchResponse: []watch.Event{
+				{Type: watch.Added, Object: getObject("gtest/vTest", "rTest", "item1")},
+				{Type: watch.Bookmark, Object: func() runtime.Object {
+					obj := getObject("gtest/vTest", "rTest", "item2")
+					obj.SetResourceVersion("39")
+					obj.SetAnnotations(map[string]string{
+						metav1.InitialEventsAnnotationKey:              "true",
+						metav1.InitialEventsListBlueprintAnnotationKey: base64.StdEncoding.EncodeToString(getJSON("vTest", "rTests", "")),
+					})
+					return obj
+				}()},
+			},
+			expectedRequestParams: []requestParam{
+				{
+					Path:  "/apis/gtest/vtest/namespaces/nstest/rtest",
+					Query: "allowWatchBookmarks=true&resourceVersionMatch=NotOlderThan&sendInitialEvents=true&watch=true",
+				},
+			},
+			expectedList: &unstructured.UnstructuredList{
+				Object: map[string]interface{}{
+					"apiVersion": "vTest",
+					"kind":       "rTests",
+					"metadata": map[string]interface{}{
+						"name":            "",
+						"resourceVersion": "39",
+					},
+				},
+				Items: []unstructured.Unstructured{
+					*getObject("gtest/vTest", "rTest", "item1"),
+				},
+			},
+		},
+		{
+			name:      "watch-list request falls back to standard list on any error",
+			namespace: "nstest",
+			// watchList method in client-go expect only watch.Add and watch.Bookmark events
+			// receiving watch.Error will cause this method to report an error which will
+			// trigger the fallback logic
+			watchResponse: []watch.Event{
+				{Type: watch.Error, Object: getObject("gtest/vTest", "rTest", "item1")},
+			},
+			listResponse: getListJSON("vTest", "UnstructuredList",
+				getJSON("gtest/vTest", "rTest", "item1"),
+				getJSON("gtest/vTest", "rTest", "item2")),
+			expectedRequestParams: []requestParam{
+				// a watch-list request first
+				{
+					Path:  "/apis/gtest/vtest/namespaces/nstest/rtest",
+					Query: "allowWatchBookmarks=true&resourceVersionMatch=NotOlderThan&sendInitialEvents=true&watch=true",
+				},
+				// a standard list request second
+				{
+					Path: "/apis/gtest/vtest/namespaces/nstest/rtest",
+				},
+			},
+			expectedList: &unstructured.UnstructuredList{
+				Object: map[string]interface{}{
+					"apiVersion": "vTest",
+					"kind":       "UnstructuredList",
+				},
+				Items: []unstructured.Unstructured{
+					*getObject("gtest/vTest", "rTest", "item1"),
+					*getObject("gtest/vTest", "rTest", "item2"),
+				},
+			},
+		},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			var actualRequestParams []requestParam
+			resource := schema.GroupVersionResource{Group: "gtest", Version: "vtest", Resource: "rtest"}
+			cl, srv, err := getClientServer(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "GET" {
+					t.Errorf("unexpected HTTP method %s. expected GET", r.Method)
+				}
+				actualRequestParams = append(actualRequestParams, requestParam{
+					Path:  r.URL.Path,
+					Query: r.URL.RawQuery,
+				})
+
+				w.Header().Set("Content-Type", runtime.ContentTypeJSON)
+				// handle LIST response
+				if len(scenario.listResponse) > 0 {
+					if _, err := w.Write(scenario.listResponse); err != nil {
+						t.Fatal(err)
+					}
+					return
+				}
+
+				// handle WATCH response
+				enc := restclientwatch.NewEncoder(streaming.NewEncoder(w, unstructured.UnstructuredJSONScheme), unstructured.UnstructuredJSONScheme)
+				for _, e := range scenario.watchResponse {
+					if err := enc.Encode(&e); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			if err != nil {
+				t.Fatalf("unexpected error when creating test client and server: %v", err)
+			}
+			defer srv.Close()
+
+			actualList, err := cl.Resource(resource).Namespace(scenario.namespace).List(context.TODO(), metav1.ListOptions{})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if !cmp.Equal(scenario.expectedRequestParams, actualRequestParams) {
+				t.Fatalf("unexpected request params: %v", cmp.Diff(scenario.expectedRequestParams, actualRequestParams))
+			}
+			if !cmp.Equal(scenario.expectedList, actualList) {
+				t.Errorf("received expected list, diff: %s", cmp.Diff(scenario.expectedList, actualList))
+			}
+		})
 	}
 }
 
@@ -188,6 +374,15 @@ func TestGet(t *testing.T) {
 			resp:        getJSON("vTest", "srTest", "namespaced_subresource_get"),
 			want:        getObject("vTest", "srTest", "namespaced_subresource_get"),
 		},
+		{
+			resource:    "rtest",
+			subresource: []string{"srtest"},
+			namespace:   "nstest",
+			name:        "namespaced_subresource_get_list",
+			path:        "/apis/gtest/vtest/namespaces/nstest/rtest/namespaced_subresource_get_list/srtest",
+			resp:        getListJSON("vTest", "srTest", getJSON("vTest", "srTest", "a1")),
+			want:        getObjectFromJSON(getListJSON("vTest", "srTest", getJSON("vTest", "srTest", "a1"))),
+		},
 	}
 	for _, tc := range tcs {
 		resource := schema.GroupVersionResource{Group: "gtest", Version: "vtest", Resource: tc.resource}
@@ -209,7 +404,7 @@ func TestGet(t *testing.T) {
 		}
 		defer srv.Close()
 
-		got, err := cl.Resource(resource).Namespace(tc.namespace).Get(tc.name, metav1.GetOptions{}, tc.subresource...)
+		got, err := cl.Resource(resource).Namespace(tc.namespace).Get(context.TODO(), tc.name, metav1.GetOptions{}, tc.subresource...)
 		if err != nil {
 			t.Errorf("unexpected error when getting %q: %v", tc.name, err)
 			continue
@@ -234,7 +429,7 @@ func TestDelete(t *testing.T) {
 		namespace     string
 		name          string
 		path          string
-		deleteOptions *metav1.DeleteOptions
+		deleteOptions metav1.DeleteOptions
 	}{
 		{
 			name: "normal_delete",
@@ -260,7 +455,7 @@ func TestDelete(t *testing.T) {
 			namespace:     "nstest",
 			name:          "namespaced_delete_with_options",
 			path:          "/apis/gtest/vtest/namespaces/nstest/rtest/namespaced_delete_with_options",
-			deleteOptions: &metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}, PropagationPolicy: &background},
+			deleteOptions: metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}, PropagationPolicy: &background},
 		},
 	}
 	for _, tc := range tcs {
@@ -274,6 +469,11 @@ func TestDelete(t *testing.T) {
 				t.Errorf("Delete(%q) got path %s. wanted %s", tc.name, r.URL.Path, tc.path)
 			}
 
+			content := r.Header.Get("Content-Type")
+			if content != runtime.ContentTypeJSON {
+				t.Errorf("Delete(%q) got Content-Type %s. wanted %s", tc.name, content, runtime.ContentTypeJSON)
+			}
+
 			w.Header().Set("Content-Type", runtime.ContentTypeJSON)
 			unstructured.UnstructuredJSONScheme.Encode(statusOK, w)
 		})
@@ -283,7 +483,7 @@ func TestDelete(t *testing.T) {
 		}
 		defer srv.Close()
 
-		err = cl.Resource(resource).Namespace(tc.namespace).Delete(tc.name, tc.deleteOptions, tc.subresource...)
+		err = cl.Resource(resource).Namespace(tc.namespace).Delete(context.TODO(), tc.name, tc.deleteOptions, tc.subresource...)
 		if err != nil {
 			t.Errorf("unexpected error when deleting %q: %v", tc.name, err)
 			continue
@@ -322,6 +522,11 @@ func TestDeleteCollection(t *testing.T) {
 				t.Errorf("DeleteCollection(%q) got path %s. wanted %s", tc.name, r.URL.Path, tc.path)
 			}
 
+			content := r.Header.Get("Content-Type")
+			if content != runtime.ContentTypeJSON {
+				t.Errorf("DeleteCollection(%q) got Content-Type %s. wanted %s", tc.name, content, runtime.ContentTypeJSON)
+			}
+
 			w.Header().Set("Content-Type", runtime.ContentTypeJSON)
 			unstructured.UnstructuredJSONScheme.Encode(statusOK, w)
 		})
@@ -331,7 +536,7 @@ func TestDeleteCollection(t *testing.T) {
 		}
 		defer srv.Close()
 
-		err = cl.Resource(resource).Namespace(tc.namespace).DeleteCollection(nil, metav1.ListOptions{})
+		err = cl.Resource(resource).Namespace(tc.namespace).DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{})
 		if err != nil {
 			t.Errorf("unexpected error when deleting collection %q: %v", tc.name, err)
 			continue
@@ -388,8 +593,13 @@ func TestCreate(t *testing.T) {
 				t.Errorf("Create(%q) got path %s. wanted %s", tc.name, r.URL.Path, tc.path)
 			}
 
+			content := r.Header.Get("Content-Type")
+			if content != runtime.ContentTypeJSON {
+				t.Errorf("Create(%q) got Content-Type %s. wanted %s", tc.name, content, runtime.ContentTypeJSON)
+			}
+
 			w.Header().Set("Content-Type", runtime.ContentTypeJSON)
-			data, err := ioutil.ReadAll(r.Body)
+			data, err := io.ReadAll(r.Body)
 			if err != nil {
 				t.Errorf("Create(%q) unexpected error reading body: %v", tc.name, err)
 				w.WriteHeader(http.StatusInternalServerError)
@@ -404,7 +614,7 @@ func TestCreate(t *testing.T) {
 		}
 		defer srv.Close()
 
-		got, err := cl.Resource(resource).Namespace(tc.namespace).Create(tc.obj, metav1.CreateOptions{}, tc.subresource...)
+		got, err := cl.Resource(resource).Namespace(tc.namespace).Create(context.TODO(), tc.obj, metav1.CreateOptions{}, tc.subresource...)
 		if err != nil {
 			t.Errorf("unexpected error when creating %q: %v", tc.name, err)
 			continue
@@ -465,8 +675,13 @@ func TestUpdate(t *testing.T) {
 				t.Errorf("Update(%q) got path %s. wanted %s", tc.name, r.URL.Path, tc.path)
 			}
 
+			content := r.Header.Get("Content-Type")
+			if content != runtime.ContentTypeJSON {
+				t.Errorf("Uppdate(%q) got Content-Type %s. wanted %s", tc.name, content, runtime.ContentTypeJSON)
+			}
+
 			w.Header().Set("Content-Type", runtime.ContentTypeJSON)
-			data, err := ioutil.ReadAll(r.Body)
+			data, err := io.ReadAll(r.Body)
 			if err != nil {
 				t.Errorf("Update(%q) unexpected error reading body: %v", tc.name, err)
 				w.WriteHeader(http.StatusInternalServerError)
@@ -481,7 +696,7 @@ func TestUpdate(t *testing.T) {
 		}
 		defer srv.Close()
 
-		got, err := cl.Resource(resource).Namespace(tc.namespace).Update(tc.obj, metav1.UpdateOptions{}, tc.subresource...)
+		got, err := cl.Resource(resource).Namespace(tc.namespace).Update(context.TODO(), tc.obj, metav1.UpdateOptions{}, tc.subresource...)
 		if err != nil {
 			t.Errorf("unexpected error when updating %q: %v", tc.name, err)
 			continue
@@ -537,6 +752,8 @@ func TestWatch(t *testing.T) {
 				t.Errorf("Watch(%q) got query %s. wanted %s", tc.name, r.URL.RawQuery, tc.query)
 			}
 
+			w.Header().Set("Content-Type", "application/json")
+
 			enc := restclientwatch.NewEncoder(streaming.NewEncoder(w, unstructured.UnstructuredJSONScheme), unstructured.UnstructuredJSONScheme)
 			for _, e := range tc.events {
 				enc.Encode(&e)
@@ -548,7 +765,7 @@ func TestWatch(t *testing.T) {
 		}
 		defer srv.Close()
 
-		watcher, err := cl.Resource(resource).Namespace(tc.namespace).Watch(metav1.ListOptions{})
+		watcher, err := cl.Resource(resource).Namespace(tc.namespace).Watch(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			t.Errorf("unexpected error when watching %q: %v", tc.name, err)
 			continue
@@ -622,7 +839,7 @@ func TestPatch(t *testing.T) {
 				t.Errorf("Patch(%q) got Content-Type %s. wanted %s", tc.name, content, types.StrategicMergePatchType)
 			}
 
-			data, err := ioutil.ReadAll(r.Body)
+			data, err := io.ReadAll(r.Body)
 			if err != nil {
 				t.Errorf("Patch(%q) unexpected error reading body: %v", tc.name, err)
 				w.WriteHeader(http.StatusInternalServerError)
@@ -638,7 +855,7 @@ func TestPatch(t *testing.T) {
 		}
 		defer srv.Close()
 
-		got, err := cl.Resource(resource).Namespace(tc.namespace).Patch(tc.name, types.StrategicMergePatchType, tc.patch, metav1.PatchOptions{}, tc.subresource...)
+		got, err := cl.Resource(resource).Namespace(tc.namespace).Patch(context.TODO(), tc.name, types.StrategicMergePatchType, tc.patch, metav1.PatchOptions{}, tc.subresource...)
 		if err != nil {
 			t.Errorf("unexpected error when patching %q: %v", tc.name, err)
 			continue
@@ -647,5 +864,109 @@ func TestPatch(t *testing.T) {
 		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("Patch(%q) want: %v\ngot: %v", tc.name, tc.want, got)
 		}
+	}
+}
+
+func TestInvalidSegments(t *testing.T) {
+	name := "bad/name"
+	namespace := "bad/namespace"
+	resource := schema.GroupVersionResource{Group: "gtest", Version: "vtest", Resource: "rtest"}
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "vtest",
+			"kind":       "vkind",
+			"metadata": map[string]interface{}{
+				"name": name,
+			},
+		},
+	}
+	cl, err := NewForConfig(&restclient.Config{
+		Host: "127.0.0.1",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create config: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Namespace(namespace).Create(context.TODO(), obj, metav1.CreateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Update(context.TODO(), obj, metav1.UpdateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	_, err = cl.Resource(resource).Namespace(namespace).Update(context.TODO(), obj, metav1.UpdateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).UpdateStatus(context.TODO(), obj, metav1.UpdateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	_, err = cl.Resource(resource).Namespace(namespace).UpdateStatus(context.TODO(), obj, metav1.UpdateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	err = cl.Resource(resource).Delete(context.TODO(), name, metav1.DeleteOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	err = cl.Resource(resource).Namespace(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	err = cl.Resource(resource).Namespace(namespace).DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Get(context.TODO(), name, metav1.GetOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	_, err = cl.Resource(resource).Namespace(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Namespace(namespace).List(context.TODO(), metav1.ListOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Namespace(namespace).Watch(context.TODO(), metav1.ListOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Patch(context.TODO(), name, types.StrategicMergePatchType, []byte("{}"), metav1.PatchOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	_, err = cl.Resource(resource).Namespace(namespace).Patch(context.TODO(), name, types.StrategicMergePatchType, []byte("{}"), metav1.PatchOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).Apply(context.TODO(), name, obj, metav1.ApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	_, err = cl.Resource(resource).Namespace(namespace).Apply(context.TODO(), name, obj, metav1.ApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
+	}
+
+	_, err = cl.Resource(resource).ApplyStatus(context.TODO(), name, obj, metav1.ApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid resource name") {
+		t.Fatalf("Expected `invalid resource name` error, got: %v", err)
+	}
+	_, err = cl.Resource(resource).Namespace(namespace).ApplyStatus(context.TODO(), name, obj, metav1.ApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "invalid namespace") {
+		t.Fatalf("Expected `invalid namespace` error, got: %v", err)
 	}
 }

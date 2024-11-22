@@ -26,7 +26,7 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	clientset "k8s.io/client-go/kubernetes"
@@ -263,12 +263,12 @@ func TestMakePayload(t *testing.T) {
 }
 
 func newTestHost(t *testing.T, clientset clientset.Interface) (string, volume.VolumeHost) {
-	tempDir, err := ioutil.TempDir("/tmp", "secret_volume_test.")
+	tempDir, err := ioutil.TempDir("", "secret_volume_test.")
 	if err != nil {
 		t.Fatalf("can't make a temp rootdir: %v", err)
 	}
 
-	return tempDir, volumetest.NewFakeVolumeHost(tempDir, clientset, emptydir.ProbeVolumePlugins())
+	return tempDir, volumetest.NewFakeVolumeHost(t, tempDir, clientset, emptydir.ProbeVolumePlugins())
 }
 
 func TestCanSupport(t *testing.T) {
@@ -279,7 +279,7 @@ func TestCanSupport(t *testing.T) {
 
 	plugin, err := pluginMgr.FindPluginByName(secretPluginName)
 	if err != nil {
-		t.Errorf("Can't find the plugin by name")
+		t.Fatal("Can't find the plugin by name")
 	}
 	if plugin.GetPluginName() != secretPluginName {
 		t.Errorf("Wrong name: %s", plugin.GetPluginName())
@@ -310,11 +310,11 @@ func TestPlugin(t *testing.T) {
 
 	plugin, err := pluginMgr.FindPluginByName(secretPluginName)
 	if err != nil {
-		t.Errorf("Can't find the plugin by name")
+		t.Fatal("Can't find the plugin by name")
 	}
 
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, UID: testPodUID}}
-	mounter, err := plugin.NewMounter(volume.NewSpecFromVolume(volumeSpec), pod, volume.VolumeOptions{})
+	mounter, err := plugin.NewMounter(volume.NewSpecFromVolume(volumeSpec), pod)
 	if err != nil {
 		t.Errorf("Failed to make a new Mounter: %v", err)
 	}
@@ -323,11 +323,11 @@ func TestPlugin(t *testing.T) {
 	}
 
 	volumePath := mounter.GetPath()
-	if !strings.HasSuffix(volumePath, fmt.Sprintf("pods/test_pod_uid/volumes/kubernetes.io~secret/test_volume_name")) {
+	if !hasPathSuffix(volumePath, "pods/test_pod_uid/volumes/kubernetes.io~secret/test_volume_name") {
 		t.Errorf("Got unexpected path: %s", volumePath)
 	}
 
-	err = mounter.SetUp(nil)
+	err = mounter.SetUp(volume.MounterArgs{})
 	if err != nil {
 		t.Errorf("Failed to setup volume: %v", err)
 	}
@@ -384,11 +384,11 @@ func TestInvalidPathSecret(t *testing.T) {
 
 	plugin, err := pluginMgr.FindPluginByName(secretPluginName)
 	if err != nil {
-		t.Errorf("Can't find the plugin by name")
+		t.Fatal("Can't find the plugin by name")
 	}
 
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, UID: testPodUID}}
-	mounter, err := plugin.NewMounter(volume.NewSpecFromVolume(volumeSpec), pod, volume.VolumeOptions{})
+	mounter, err := plugin.NewMounter(volume.NewSpecFromVolume(volumeSpec), pod)
 	if err != nil {
 		t.Errorf("Failed to make a new Mounter: %v", err)
 	}
@@ -397,11 +397,12 @@ func TestInvalidPathSecret(t *testing.T) {
 	}
 
 	volumePath := mounter.GetPath()
-	if !strings.HasSuffix(volumePath, fmt.Sprintf("pods/test_pod_uid/volumes/kubernetes.io~secret/test_volume_name")) {
+	if !hasPathSuffix(volumePath, "pods/test_pod_uid/volumes/kubernetes.io~secret/test_volume_name") {
 		t.Errorf("Got unexpected path: %s", volumePath)
 	}
 
-	err = mounter.SetUp(nil)
+	var mounterArgs volume.MounterArgs
+	err = mounter.SetUp(mounterArgs)
 	if err == nil {
 		t.Errorf("Expected error while setting up secret")
 	}
@@ -433,11 +434,11 @@ func TestPluginReboot(t *testing.T) {
 
 	plugin, err := pluginMgr.FindPluginByName(secretPluginName)
 	if err != nil {
-		t.Errorf("Can't find the plugin by name")
+		t.Fatal("Can't find the plugin by name")
 	}
 
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, UID: testPodUID}}
-	mounter, err := plugin.NewMounter(volume.NewSpecFromVolume(volumeSpec), pod, volume.VolumeOptions{})
+	mounter, err := plugin.NewMounter(volume.NewSpecFromVolume(volumeSpec), pod)
 	if err != nil {
 		t.Errorf("Failed to make a new Mounter: %v", err)
 	}
@@ -448,11 +449,11 @@ func TestPluginReboot(t *testing.T) {
 	podMetadataDir := fmt.Sprintf("%v/pods/test_pod_uid3/plugins/kubernetes.io~secret/test_volume_name", rootDir)
 	util.SetReady(podMetadataDir)
 	volumePath := mounter.GetPath()
-	if !strings.HasSuffix(volumePath, fmt.Sprintf("pods/test_pod_uid3/volumes/kubernetes.io~secret/test_volume_name")) {
+	if !hasPathSuffix(volumePath, "pods/test_pod_uid3/volumes/kubernetes.io~secret/test_volume_name") {
 		t.Errorf("Got unexpected path: %s", volumePath)
 	}
 
-	err = mounter.SetUp(nil)
+	err = mounter.SetUp(volume.MounterArgs{})
 	if err != nil {
 		t.Errorf("Failed to setup volume: %v", err)
 	}
@@ -487,11 +488,11 @@ func TestPluginOptional(t *testing.T) {
 
 	plugin, err := pluginMgr.FindPluginByName(secretPluginName)
 	if err != nil {
-		t.Errorf("Can't find the plugin by name")
+		t.Fatal("Can't find the plugin by name")
 	}
 
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, UID: testPodUID}}
-	mounter, err := plugin.NewMounter(volume.NewSpecFromVolume(volumeSpec), pod, volume.VolumeOptions{})
+	mounter, err := plugin.NewMounter(volume.NewSpecFromVolume(volumeSpec), pod)
 	if err != nil {
 		t.Errorf("Failed to make a new Mounter: %v", err)
 	}
@@ -500,11 +501,11 @@ func TestPluginOptional(t *testing.T) {
 	}
 
 	volumePath := mounter.GetPath()
-	if !strings.HasSuffix(volumePath, fmt.Sprintf("pods/test_pod_uid/volumes/kubernetes.io~secret/test_volume_name")) {
+	if !hasPathSuffix(volumePath, "pods/test_pod_uid/volumes/kubernetes.io~secret/test_volume_name") {
 		t.Errorf("Got unexpected path: %s", volumePath)
 	}
 
-	err = mounter.SetUp(nil)
+	err = mounter.SetUp(volume.MounterArgs{})
 	if err != nil {
 		t.Errorf("Failed to setup volume: %v", err)
 	}
@@ -585,11 +586,11 @@ func TestPluginOptionalKeys(t *testing.T) {
 
 	plugin, err := pluginMgr.FindPluginByName(secretPluginName)
 	if err != nil {
-		t.Errorf("Can't find the plugin by name")
+		t.Fatal("Can't find the plugin by name")
 	}
 
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, UID: testPodUID}}
-	mounter, err := plugin.NewMounter(volume.NewSpecFromVolume(volumeSpec), pod, volume.VolumeOptions{})
+	mounter, err := plugin.NewMounter(volume.NewSpecFromVolume(volumeSpec), pod)
 	if err != nil {
 		t.Errorf("Failed to make a new Mounter: %v", err)
 	}
@@ -598,11 +599,11 @@ func TestPluginOptionalKeys(t *testing.T) {
 	}
 
 	volumePath := mounter.GetPath()
-	if !strings.HasSuffix(volumePath, fmt.Sprintf("pods/test_pod_uid/volumes/kubernetes.io~secret/test_volume_name")) {
+	if !hasPathSuffix(volumePath, "pods/test_pod_uid/volumes/kubernetes.io~secret/test_volume_name") {
 		t.Errorf("Got unexpected path: %s", volumePath)
 	}
 
-	err = mounter.SetUp(nil)
+	err = mounter.SetUp(volume.MounterArgs{})
 	if err != nil {
 		t.Errorf("Failed to setup volume: %v", err)
 	}
@@ -699,4 +700,8 @@ func doTestCleanAndTeardown(plugin volume.VolumePlugin, podUID types.UID, testVo
 	} else if !os.IsNotExist(err) {
 		t.Errorf("TearDown() failed: %v", err)
 	}
+}
+
+func hasPathSuffix(s, suffix string) bool {
+	return strings.HasSuffix(s, filepath.FromSlash(suffix))
 }

@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 /*
@@ -19,6 +20,7 @@ limitations under the License.
 package winstats
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -38,6 +40,7 @@ func (f fakeWinNodeStatsClient) startMonitoring() error {
 func (f fakeWinNodeStatsClient) getNodeMetrics() (nodeMetrics, error) {
 	return nodeMetrics{
 		cpuUsageCoreNanoSeconds:   123,
+		cpuUsageNanoCores:         23,
 		memoryPrivWorkingSetBytes: 1234,
 		memoryCommittedBytes:      12345,
 		timeStamp:                 timeStamp,
@@ -55,6 +58,7 @@ func (f fakeWinNodeStatsClient) getMachineInfo() (*cadvisorapi.MachineInfo, erro
 		NumCores:       4,
 		MemoryCapacity: 1.6e+10,
 		MachineID:      "somehostname",
+		SystemUUID:     "E6C8AC43-582B-3575-4E1F-6DA170888906",
 	}, nil
 }
 
@@ -76,6 +80,11 @@ func TestWinContainerInfos(t *testing.T) {
 		Cpu: &cadvisorapi.CpuStats{
 			Usage: cadvisorapi.CpuUsage{
 				Total: 123,
+			},
+		},
+		CpuInst: &cadvisorapiv2.CpuInstStats{
+			Usage: cadvisorapiv2.CpuInstUsage{
+				Total: 23,
 			},
 		},
 		Memory: &cadvisorapi.MemoryStats{
@@ -100,6 +109,7 @@ func TestWinContainerInfos(t *testing.T) {
 	assert.Equal(t, actualRootInfos["/"].Spec, infos["/"].Spec)
 	assert.Equal(t, len(actualRootInfos["/"].Stats), len(infos["/"].Stats))
 	assert.Equal(t, actualRootInfos["/"].Stats[0].Cpu, infos["/"].Stats[0].Cpu)
+	assert.Equal(t, actualRootInfos["/"].Stats[0].CpuInst, infos["/"].Stats[0].CpuInst)
 	assert.Equal(t, actualRootInfos["/"].Stats[0].Memory, infos["/"].Stats[0].Memory)
 }
 
@@ -111,7 +121,8 @@ func TestWinMachineInfo(t *testing.T) {
 	assert.Equal(t, machineInfo, &cadvisorapi.MachineInfo{
 		NumCores:       4,
 		MemoryCapacity: 1.6e+10,
-		MachineID:      "somehostname"})
+		MachineID:      "somehostname",
+		SystemUUID:     "E6C8AC43-582B-3575-4E1F-6DA170888906"})
 }
 
 func TestWinVersionInfo(t *testing.T) {
@@ -121,6 +132,26 @@ func TestWinVersionInfo(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, versionInfo, &cadvisorapi.VersionInfo{
 		KernelVersion: "v42"})
+}
+
+func TestGetDirFsInfo(t *testing.T) {
+	c := getClient(t)
+
+	// Try with a non-existent path.
+	_, err := c.GetDirFsInfo("foo/lish")
+	expectedErrMsg := "The system cannot find the path specified."
+	if err == nil || err.Error() != expectedErrMsg {
+		t.Fatalf("expected error message `%s` but got `%v`", expectedErrMsg, err)
+	}
+
+	dir, err := os.MkdirTemp("", "fsinfo")
+	assert.NoError(t, err)
+	defer os.RemoveAll(dir)
+
+	fsInfo, err := c.GetDirFsInfo(dir)
+	assert.NoError(t, err)
+	assert.NotZero(t, fsInfo.Capacity)
+	assert.NotZero(t, fsInfo.Available)
 }
 
 func getClient(t *testing.T) Client {

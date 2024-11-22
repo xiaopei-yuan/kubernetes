@@ -17,7 +17,9 @@ limitations under the License.
 package serviceaccount
 
 import (
+	"context"
 	"k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	v1listers "k8s.io/client-go/listers/core/v1"
@@ -30,33 +32,45 @@ type clientGetter struct {
 	secretLister         v1listers.SecretLister
 	serviceAccountLister v1listers.ServiceAccountLister
 	podLister            v1listers.PodLister
+	nodeLister           v1listers.NodeLister
 }
 
 // NewGetterFromClient returns a ServiceAccountTokenGetter that
-// uses the specified client to retrieve service accounts and secrets.
+// uses the specified client to retrieve service accounts, pods, secrets and nodes.
 // The client should NOT authenticate using a service account token
 // the returned getter will be used to retrieve, or recursion will result.
-func NewGetterFromClient(c clientset.Interface, secretLister v1listers.SecretLister, serviceAccountLister v1listers.ServiceAccountLister, podLister v1listers.PodLister) serviceaccount.ServiceAccountTokenGetter {
-	return clientGetter{c, secretLister, serviceAccountLister, podLister}
+func NewGetterFromClient(c clientset.Interface, secretLister v1listers.SecretLister, serviceAccountLister v1listers.ServiceAccountLister, podLister v1listers.PodLister, nodeLister v1listers.NodeLister) serviceaccount.ServiceAccountTokenGetter {
+	return clientGetter{c, secretLister, serviceAccountLister, podLister, nodeLister}
 }
 
 func (c clientGetter) GetServiceAccount(namespace, name string) (*v1.ServiceAccount, error) {
 	if serviceAccount, err := c.serviceAccountLister.ServiceAccounts(namespace).Get(name); err == nil {
 		return serviceAccount, nil
 	}
-	return c.client.CoreV1().ServiceAccounts(namespace).Get(name, metav1.GetOptions{})
+	return c.client.CoreV1().ServiceAccounts(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 }
 
 func (c clientGetter) GetPod(namespace, name string) (*v1.Pod, error) {
 	if pod, err := c.podLister.Pods(namespace).Get(name); err == nil {
 		return pod, nil
 	}
-	return c.client.CoreV1().Pods(namespace).Get(name, metav1.GetOptions{})
+	return c.client.CoreV1().Pods(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 }
 
 func (c clientGetter) GetSecret(namespace, name string) (*v1.Secret, error) {
 	if secret, err := c.secretLister.Secrets(namespace).Get(name); err == nil {
 		return secret, nil
 	}
-	return c.client.CoreV1().Secrets(namespace).Get(name, metav1.GetOptions{})
+	return c.client.CoreV1().Secrets(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+}
+
+func (c clientGetter) GetNode(name string) (*v1.Node, error) {
+	// handle the case where the node lister isn't set due to feature being disabled
+	if c.nodeLister == nil {
+		return nil, apierrors.NewNotFound(v1.Resource("nodes"), name)
+	}
+	if node, err := c.nodeLister.Get(name); err == nil {
+		return node, nil
+	}
+	return c.client.CoreV1().Nodes().Get(context.TODO(), name, metav1.GetOptions{})
 }

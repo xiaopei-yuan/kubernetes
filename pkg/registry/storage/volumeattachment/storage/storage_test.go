@@ -19,22 +19,22 @@ package storage
 import (
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/diff"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/generic"
 	genericregistrytest "k8s.io/apiserver/pkg/registry/generic/testing"
 	"k8s.io/apiserver/pkg/registry/rest"
-	etcdtesting "k8s.io/apiserver/pkg/storage/etcd/testing"
+	etcd3testing "k8s.io/apiserver/pkg/storage/etcd3/testing"
 	storageapi "k8s.io/kubernetes/pkg/apis/storage"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
 )
 
-func newStorage(t *testing.T) (*REST, *StatusREST, *etcdtesting.EtcdTestServer) {
+func newStorage(t *testing.T) (*REST, *StatusREST, *etcd3testing.EtcdTestServer) {
 	etcdStorage, server := registrytest.NewEtcdStorage(t, storageapi.GroupName)
 	restOptions := generic.RESTOptions{
 		StorageConfig:           etcdStorage,
@@ -42,7 +42,10 @@ func newStorage(t *testing.T) (*REST, *StatusREST, *etcdtesting.EtcdTestServer) 
 		DeleteCollectionWorkers: 1,
 		ResourcePrefix:          "volumeattachments",
 	}
-	volumeAttachmentStorage := NewStorage(restOptions)
+	volumeAttachmentStorage, err := NewStorage(restOptions)
+	if err != nil {
+		t.Fatalf("unexpected error from REST storage: %v", err)
+	}
 	return volumeAttachmentStorage.VolumeAttachment, volumeAttachmentStorage.Status, server
 }
 
@@ -191,9 +194,9 @@ func TestEtcdStatusUpdate(t *testing.T) {
 	}
 	attachmentOut := obj.(*storageapi.VolumeAttachment)
 	if !apiequality.Semantic.DeepEqual(attachmentIn.Spec, attachmentOut.Spec) {
-		t.Errorf("objects differ: %v", diff.ObjectDiff(attachmentOut.Spec, attachmentIn.Spec))
+		t.Errorf("objects differ: %v", cmp.Diff(attachmentOut.Spec, attachmentIn.Spec))
 	}
 	if !apiequality.Semantic.DeepEqual(attachmentIn.Status, attachmentOut.Status) {
-		t.Errorf("objects differ: %v", diff.ObjectDiff(attachmentOut.Status, attachmentIn.Status))
+		t.Errorf("objects differ: %v", cmp.Diff(attachmentOut.Status, attachmentIn.Status))
 	}
 }

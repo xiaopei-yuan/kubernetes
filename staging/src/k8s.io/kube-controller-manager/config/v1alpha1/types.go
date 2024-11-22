@@ -18,7 +18,9 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	componentbaseconfigv1alpha1 "k8s.io/component-base/config/v1alpha1"
+	cpconfigv1alpha1 "k8s.io/cloud-provider/config/v1alpha1"
+	serviceconfigv1alpha1 "k8s.io/cloud-provider/controllers/service/config/v1alpha1"
+	cmconfigv1alpha1 "k8s.io/controller-manager/config/v1alpha1"
 )
 
 // PersistentVolumeRecyclerConfiguration contains elements describing persistent volume plugins.
@@ -85,10 +87,10 @@ type KubeControllerManagerConfiguration struct {
 	metav1.TypeMeta `json:",inline"`
 
 	// Generic holds configuration for a generic controller-manager
-	Generic GenericControllerManagerConfiguration
+	Generic cmconfigv1alpha1.GenericControllerManagerConfiguration
 	// KubeCloudSharedConfiguration holds configuration for shared related features
 	// both in cloud controller manager and kube-controller manager.
-	KubeCloudShared KubeCloudSharedConfiguration
+	KubeCloudShared cpconfigv1alpha1.KubeCloudSharedConfiguration
 
 	// AttachDetachControllerConfiguration holds configuration for
 	// AttachDetachController related features.
@@ -102,12 +104,24 @@ type KubeControllerManagerConfiguration struct {
 	// DeploymentControllerConfiguration holds configuration for
 	// DeploymentController related features.
 	DeploymentController DeploymentControllerConfiguration
+	// StatefulSetControllerConfiguration holds configuration for
+	// StatefulSetController related features.
+	StatefulSetController StatefulSetControllerConfiguration
 	// DeprecatedControllerConfiguration holds configuration for some deprecated
 	// features.
 	DeprecatedController DeprecatedControllerConfiguration
 	// EndpointControllerConfiguration holds configuration for EndpointController
 	// related features.
 	EndpointController EndpointControllerConfiguration
+	// EndpointSliceControllerConfiguration holds configuration for
+	// EndpointSliceController related features.
+	EndpointSliceController EndpointSliceControllerConfiguration
+	// EndpointSliceMirroringControllerConfiguration holds configuration for
+	// EndpointSliceMirroringController related features.
+	EndpointSliceMirroringController EndpointSliceMirroringControllerConfiguration
+	// EphemeralVolumeControllerConfiguration holds configuration for EphemeralVolumeController
+	// related features.
+	EphemeralVolumeController EphemeralVolumeControllerConfiguration
 	// GarbageCollectorControllerConfiguration holds configuration for
 	// GarbageCollectorController related features.
 	GarbageCollectorController GarbageCollectorControllerConfiguration
@@ -115,6 +129,10 @@ type KubeControllerManagerConfiguration struct {
 	HPAController HPAControllerConfiguration
 	// JobControllerConfiguration holds configuration for JobController related features.
 	JobController JobControllerConfiguration
+	// CronJobControllerConfiguration holds configuration for CronJobController related features.
+	CronJobController CronJobControllerConfiguration
+	// LegacySATokenCleanerConfiguration holds configuration for LegacySATokenCleaner related features.
+	LegacySATokenCleaner LegacySATokenCleanerConfiguration
 	// NamespaceControllerConfiguration holds configuration for NamespaceController
 	// related features.
 	NamespaceController NamespaceControllerConfiguration
@@ -143,71 +161,13 @@ type KubeControllerManagerConfiguration struct {
 	SAController SAControllerConfiguration
 	// ServiceControllerConfiguration holds configuration for ServiceController
 	// related features.
-	ServiceController ServiceControllerConfiguration
+	ServiceController serviceconfigv1alpha1.ServiceControllerConfiguration
 	// TTLAfterFinishedControllerConfiguration holds configuration for
 	// TTLAfterFinishedController related features.
 	TTLAfterFinishedController TTLAfterFinishedControllerConfiguration
-}
-
-// GenericControllerManagerConfiguration holds configuration for a generic controller-manager.
-type GenericControllerManagerConfiguration struct {
-	// port is the port that the controller-manager's http service runs on.
-	Port int32
-	// address is the IP address to serve on (set to 0.0.0.0 for all interfaces).
-	Address string
-	// minResyncPeriod is the resync period in reflectors; will be random between
-	// minResyncPeriod and 2*minResyncPeriod.
-	MinResyncPeriod metav1.Duration
-	// ClientConnection specifies the kubeconfig file and client connection
-	// settings for the proxy server to use when communicating with the apiserver.
-	ClientConnection componentbaseconfigv1alpha1.ClientConnectionConfiguration
-	// How long to wait between starting controller managers
-	ControllerStartInterval metav1.Duration
-	// leaderElection defines the configuration of leader election client.
-	LeaderElection componentbaseconfigv1alpha1.LeaderElectionConfiguration
-	// Controllers is the list of controllers to enable or disable
-	// '*' means "all enabled by default controllers"
-	// 'foo' means "enable 'foo'"
-	// '-foo' means "disable 'foo'"
-	// first item for a particular name wins
-	Controllers []string
-	// DebuggingConfiguration holds configuration for Debugging related features.
-	Debugging componentbaseconfigv1alpha1.DebuggingConfiguration
-}
-
-// KubeCloudSharedConfiguration contains elements shared by both kube-controller manager
-// and cloud-controller manager, but not genericconfig.
-type KubeCloudSharedConfiguration struct {
-	// CloudProviderConfiguration holds configuration for CloudProvider related features.
-	CloudProvider CloudProviderConfiguration
-	// externalCloudVolumePlugin specifies the plugin to use when cloudProvider is "external".
-	// It is currently used by the in repo cloud providers to handle node and volume control in the KCM.
-	ExternalCloudVolumePlugin string
-	// useServiceAccountCredentials indicates whether controllers should be run with
-	// individual service account credentials.
-	UseServiceAccountCredentials bool
-	// run with untagged cloud instances
-	AllowUntaggedCloud bool
-	// routeReconciliationPeriod is the period for reconciling routes created for Nodes by cloud provider..
-	RouteReconciliationPeriod metav1.Duration
-	// nodeMonitorPeriod is the period for syncing NodeStatus in NodeController.
-	NodeMonitorPeriod metav1.Duration
-	// clusterName is the instance prefix for the cluster.
-	ClusterName string
-	// clusterCIDR is CIDR Range for Pods in cluster.
-	ClusterCIDR string
-	// AllocateNodeCIDRs enables CIDRs for Pods to be allocated and, if
-	// ConfigureCloudRoutes is true, to be set on the cloud provider.
-	AllocateNodeCIDRs bool
-	// CIDRAllocatorType determines what kind of pod CIDR allocator will be used.
-	CIDRAllocatorType string
-	// configureCloudRoutes enables CIDRs allocated with allocateNodeCIDRs
-	// to be configured on the cloud provider.
-	ConfigureCloudRoutes *bool
-	// nodeSyncPeriod is the period for syncing nodes from cloudprovider. Longer
-	// periods will result in fewer calls to cloud provider, but may delay addition
-	// of new nodes to cluster.
-	NodeSyncPeriod metav1.Duration
+	// ValidatingAdmissionPolicyStatusControllerConfiguration holds configuration for
+	// ValidatingAdmissionPolicyStatusController related features.
+	ValidatingAdmissionPolicyStatusController ValidatingAdmissionPolicyStatusControllerConfiguration
 }
 
 // AttachDetachControllerConfiguration contains elements describing AttachDetachController.
@@ -217,16 +177,12 @@ type AttachDetachControllerConfiguration struct {
 	// This flag enables or disables reconcile.  Is false by default, and thus enabled.
 	DisableAttachDetachReconcilerSync bool
 	// ReconcilerSyncLoopPeriod is the amount of time the reconciler sync states loop
-	// wait between successive executions. Is set to 5 sec by default.
+	// wait between successive executions. Is set to 60 sec by default.
 	ReconcilerSyncLoopPeriod metav1.Duration
-}
-
-// CloudProviderConfiguration contains basically elements about cloud provider.
-type CloudProviderConfiguration struct {
-	// Name is the provider for cloud services.
-	Name string
-	// cloudConfigFile is the path to the cloud provider configuration file.
-	CloudConfigFile string
+	// DisableForceDetachOnTimeout disables force detach when the maximum unmount
+	// time is exceeded. Is false by default, and thus force detach on unmount is
+	// enabled.
+	DisableForceDetachOnTimeout bool `json:"disableForceDetachOnTimeout"`
 }
 
 // CSRSigningControllerConfiguration contains elements describing CSRSigningController.
@@ -237,9 +193,29 @@ type CSRSigningControllerConfiguration struct {
 	// clusterSigningCertFile is the filename containing a PEM-encoded
 	// RSA or ECDSA private key used to issue cluster-scoped certificates
 	ClusterSigningKeyFile string
-	// clusterSigningDuration is the length of duration signed certificates
-	// will be given.
+
+	// kubeletServingSignerConfiguration holds the certificate and key used to issue certificates for the kubernetes.io/kubelet-serving signer
+	KubeletServingSignerConfiguration CSRSigningConfiguration
+	// kubeletClientSignerConfiguration holds the certificate and key used to issue certificates for the kubernetes.io/kube-apiserver-client-kubelet
+	KubeletClientSignerConfiguration CSRSigningConfiguration
+	// kubeAPIServerClientSignerConfiguration holds the certificate and key used to issue certificates for the kubernetes.io/kube-apiserver-client
+	KubeAPIServerClientSignerConfiguration CSRSigningConfiguration
+	// legacyUnknownSignerConfiguration holds the certificate and key used to issue certificates for the kubernetes.io/legacy-unknown
+	LegacyUnknownSignerConfiguration CSRSigningConfiguration
+
+	// clusterSigningDuration is the max length of duration signed certificates will be given.
+	// Individual CSRs may request shorter certs by setting spec.expirationSeconds.
 	ClusterSigningDuration metav1.Duration
+}
+
+// CSRSigningConfiguration holds information about a particular CSR signer
+type CSRSigningConfiguration struct {
+	// certFile is the filename containing a PEM-encoded
+	// X509 CA certificate used to issue certificates
+	CertFile string
+	// keyFile is the filename containing a PEM-encoded
+	// RSA or ECDSA private key used to issue certificates
+	KeyFile string
 }
 
 // DaemonSetControllerConfiguration contains elements describing DaemonSetController.
@@ -256,21 +232,18 @@ type DeploymentControllerConfiguration struct {
 	// allowed to sync concurrently. Larger number = more responsive deployments,
 	// but more CPU (and network) load.
 	ConcurrentDeploymentSyncs int32
-	// deploymentControllerSyncPeriod is the period for syncing the deployments.
-	DeploymentControllerSyncPeriod metav1.Duration
+}
+
+// StatefulSetControllerConfiguration contains elements describing StatefulSetController.
+type StatefulSetControllerConfiguration struct {
+	// concurrentStatefulSetSyncs is the number of statefulset objects that are
+	// allowed to sync concurrently. Larger number = more responsive statefulsets,
+	// but more CPU (and network) load.
+	ConcurrentStatefulSetSyncs int32
 }
 
 // DeprecatedControllerConfiguration contains elements be deprecated.
 type DeprecatedControllerConfiguration struct {
-	// DEPRECATED: deletingPodsQps is the number of nodes per second on which pods are deleted in
-	// case of node failure.
-	DeletingPodsQPS float32
-	// DEPRECATED: deletingPodsBurst is the number of nodes on which pods are bursty deleted in
-	// case of node failure. For more details look into RateLimiter.
-	DeletingPodsBurst int32
-	// registerRetryCount is the number of retries for initial node registration.
-	// Retry interval equals node-sync-period.
-	RegisterRetryCount int32
 }
 
 // EndpointControllerConfiguration contains elements describing EndpointController.
@@ -279,6 +252,59 @@ type EndpointControllerConfiguration struct {
 	// that will be done concurrently. Larger number = faster endpoint updating,
 	// but more CPU (and network) load.
 	ConcurrentEndpointSyncs int32
+
+	// EndpointUpdatesBatchPeriod describes the length of endpoint updates batching period.
+	// Processing of pod changes will be delayed by this duration to join them with potential
+	// upcoming updates and reduce the overall number of endpoints updates.
+	EndpointUpdatesBatchPeriod metav1.Duration
+}
+
+// EndpointSliceControllerConfiguration contains elements describing
+// EndpointSliceController.
+type EndpointSliceControllerConfiguration struct {
+	// concurrentServiceEndpointSyncs is the number of service endpoint syncing
+	// operations that will be done concurrently. Larger number = faster
+	// endpoint slice updating, but more CPU (and network) load.
+	ConcurrentServiceEndpointSyncs int32
+
+	// maxEndpointsPerSlice is the maximum number of endpoints that will be
+	// added to an EndpointSlice. More endpoints per slice will result in fewer
+	// and larger endpoint slices, but larger resources.
+	MaxEndpointsPerSlice int32
+
+	// EndpointUpdatesBatchPeriod describes the length of endpoint updates batching period.
+	// Processing of pod changes will be delayed by this duration to join them with potential
+	// upcoming updates and reduce the overall number of endpoints updates.
+	EndpointUpdatesBatchPeriod metav1.Duration
+}
+
+// EndpointSliceMirroringControllerConfiguration contains elements describing
+// EndpointSliceMirroringController.
+type EndpointSliceMirroringControllerConfiguration struct {
+	// mirroringConcurrentServiceEndpointSyncs is the number of service endpoint
+	// syncing operations that will be done concurrently. Larger number = faster
+	// endpoint slice updating, but more CPU (and network) load.
+	MirroringConcurrentServiceEndpointSyncs int32
+
+	// mirroringMaxEndpointsPerSubset is the maximum number of endpoints that
+	// will be mirrored to an EndpointSlice for an EndpointSubset.
+	MirroringMaxEndpointsPerSubset int32
+
+	// mirroringEndpointUpdatesBatchPeriod can be used to batch EndpointSlice
+	// updates. All updates triggered by EndpointSlice changes will be delayed
+	// by up to 'mirroringEndpointUpdatesBatchPeriod'. If other addresses in the
+	// same Endpoints resource change in that period, they will be batched to a
+	// single EndpointSlice update. Default 0 value means that each Endpoints
+	// update triggers an EndpointSlice update.
+	MirroringEndpointUpdatesBatchPeriod metav1.Duration
+}
+
+// EphemeralVolumeControllerConfiguration contains elements describing EphemeralVolumeController.
+type EphemeralVolumeControllerConfiguration struct {
+	// ConcurrentEphemeralVolumeSyncseSyncs is the number of ephemeral volume syncing operations
+	// that will be done concurrently. Larger number = faster ephemeral volume updating,
+	// but more CPU (and network) load.
+	ConcurrentEphemeralVolumeSyncs int32
 }
 
 // GarbageCollectorControllerConfiguration contains elements describing GarbageCollectorController.
@@ -296,23 +322,18 @@ type GarbageCollectorControllerConfiguration struct {
 
 // HPAControllerConfiguration contains elements describing HPAController.
 type HPAControllerConfiguration struct {
+	// ConcurrentHorizontalPodAutoscalerSyncs is the number of HPA objects that are allowed to sync concurrently.
+	// Larger number = more responsive HPA processing, but more CPU (and network) load.
+	ConcurrentHorizontalPodAutoscalerSyncs int32
 	// HorizontalPodAutoscalerSyncPeriod is the period for syncing the number of
 	// pods in horizontal pod autoscaler.
 	HorizontalPodAutoscalerSyncPeriod metav1.Duration
-	// HorizontalPodAutoscalerUpscaleForbiddenWindow is a period after which next upscale allowed.
-	HorizontalPodAutoscalerUpscaleForbiddenWindow metav1.Duration
 	// HorizontalPodAutoscalerDowncaleStabilizationWindow is a period for which autoscaler will look
 	// backwards and not scale down below any recommendation it made during that period.
 	HorizontalPodAutoscalerDownscaleStabilizationWindow metav1.Duration
-	// HorizontalPodAutoscalerDownscaleForbiddenWindow is a period after which next downscale allowed.
-	HorizontalPodAutoscalerDownscaleForbiddenWindow metav1.Duration
 	// HorizontalPodAutoscalerTolerance is the tolerance for when
 	// resource usage suggests upscaling/downscaling
 	HorizontalPodAutoscalerTolerance float64
-	// HorizontalPodAutoscalerUseRESTClients causes the HPA controller to use REST clients
-	// through the kube-aggregator when enabled, instead of using the legacy metrics client
-	// through the API server proxy.
-	HorizontalPodAutoscalerUseRESTClients *bool
 	// HorizontalPodAutoscalerCPUInitializationPeriod is the period after pod start when CPU samples
 	// might be skipped.
 	HorizontalPodAutoscalerCPUInitializationPeriod metav1.Duration
@@ -331,6 +352,21 @@ type JobControllerConfiguration struct {
 	ConcurrentJobSyncs int32
 }
 
+// CronJobControllerConfiguration contains elements describing CrongJob2Controller.
+type CronJobControllerConfiguration struct {
+	// concurrentCronJobSyncs is the number of job objects that are
+	// allowed to sync concurrently. Larger number = more responsive jobs,
+	// but more CPU (and network) load.
+	ConcurrentCronJobSyncs int32
+}
+
+// LegacySATokenCleanerConfiguration contains elements describing LegacySATokenCleaner
+type LegacySATokenCleanerConfiguration struct {
+	// CleanUpPeriod is the period of time since the last usage of an
+	// auto-generated service account token before it can be deleted.
+	CleanUpPeriod metav1.Duration
+}
+
 // NamespaceControllerConfiguration contains elements describing NamespaceController.
 type NamespaceControllerConfiguration struct {
 	// namespaceSyncPeriod is the period for syncing namespace life-cycle
@@ -345,15 +381,18 @@ type NamespaceControllerConfiguration struct {
 type NodeIPAMControllerConfiguration struct {
 	// serviceCIDR is CIDR Range for Services in cluster.
 	ServiceCIDR string
+	// secondaryServiceCIDR is CIDR Range for Services in cluster. This is used in dual stack clusters. SecondaryServiceCIDR must be of different IP family than ServiceCIDR
+	SecondaryServiceCIDR string
 	// NodeCIDRMaskSize is the mask size for node cidr in cluster.
 	NodeCIDRMaskSize int32
+	// NodeCIDRMaskSizeIPv4 is the mask size for node cidr in dual-stack cluster.
+	NodeCIDRMaskSizeIPv4 int32
+	// NodeCIDRMaskSizeIPv6 is the mask size for node cidr in dual-stack cluster.
+	NodeCIDRMaskSizeIPv6 int32
 }
 
 // NodeLifecycleControllerConfiguration contains elements describing NodeLifecycleController.
 type NodeLifecycleControllerConfiguration struct {
-	// If set to true enables NoExecute Taints and will evict all not-tolerating
-	// Pod running on Nodes tainted with this kind of Taints.
-	EnableTaintManager *bool
 	// nodeEvictionRate is the number of nodes per second on which pods are deleted in case of node failure when a zone is healthy
 	NodeEvictionRate float32
 	// secondaryNodeEvictionRate is the number of nodes per second on which pods are deleted in case of node failure when a zone is unhealthy
@@ -364,7 +403,8 @@ type NodeLifecycleControllerConfiguration struct {
 	// nodeMontiorGracePeriod is the amount of time which we allow a running node to be
 	// unresponsive before marking it unhealthy. Must be N times more than kubelet's
 	// nodeStatusUpdateFrequency, where N means number of retries allowed for kubelet
-	// to post node status.
+	// to post node status. This value should also be greater than the sum of
+	// HTTP2_PING_TIMEOUT_SECONDS and HTTP2_READ_IDLE_TIMEOUT_SECONDS.
 	NodeMonitorGracePeriod metav1.Duration
 	// podEvictionTimeout is the grace period for deleting pods on failed nodes.
 	PodEvictionTimeout metav1.Duration
@@ -433,17 +473,18 @@ type SAControllerConfiguration struct {
 	RootCAFile string
 }
 
-// ServiceControllerConfiguration contains elements describing ServiceController.
-type ServiceControllerConfiguration struct {
-	// concurrentServiceSyncs is the number of services that are
-	// allowed to sync concurrently. Larger number = more responsive service
-	// management, but more CPU (and network) load.
-	ConcurrentServiceSyncs int32
-}
-
 // TTLAfterFinishedControllerConfiguration contains elements describing TTLAfterFinishedController.
 type TTLAfterFinishedControllerConfiguration struct {
 	// concurrentTTLSyncs is the number of TTL-after-finished collector workers that are
 	// allowed to sync concurrently.
 	ConcurrentTTLSyncs int32
+}
+
+// ValidatingAdmissionPolicyStatusControllerConfiguration contains elements describing ValidatingAdmissionPolicyStatusController.
+type ValidatingAdmissionPolicyStatusControllerConfiguration struct {
+	// ConcurrentPolicySyncs is the number of policy objects that are
+	// allowed to sync concurrently. Larger number = quicker type checking,
+	// but more CPU (and network) load.
+	// The default value is 5.
+	ConcurrentPolicySyncs int32
 }

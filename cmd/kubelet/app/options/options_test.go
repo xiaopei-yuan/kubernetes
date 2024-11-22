@@ -21,10 +21,11 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/spf13/pflag"
 
-	"k8s.io/apimachinery/pkg/util/diff"
 	cliflag "k8s.io/component-base/cli/flag"
+	"k8s.io/kubernetes/pkg/kubelet/config"
 )
 
 func newKubeletServerOrDie() *KubeletServer {
@@ -33,10 +34,6 @@ func newKubeletServerOrDie() *KubeletServer {
 		panic(err)
 	}
 	return s
-}
-
-func cleanFlags(s *KubeletServer) {
-	s.DynamicConfigDir = cliflag.NewStringFlag(s.DynamicConfigDir.Value())
 }
 
 // TestRoundTrip ensures that flag values from the Kubelet can be serialized
@@ -103,9 +100,8 @@ func TestRoundTrip(t *testing.T) {
 			}
 			continue
 		}
-		cleanFlags(outputFlags)
-		if !reflect.DeepEqual(modifiedFlags, outputFlags) {
-			t.Errorf("%s: flags did not round trip: %s", testCase.name, diff.ObjectReflectDiff(modifiedFlags, outputFlags))
+		if !reflect.DeepEqual(modifiedFlags.KubeletFlags, outputFlags.KubeletFlags) {
+			t.Errorf("%s: flags did not round trip: %s", testCase.name, cmp.Diff(modifiedFlags.KubeletFlags, outputFlags.KubeletFlags))
 			continue
 		}
 	}
@@ -144,4 +140,57 @@ func asArgs(fn, defaultFn func(*pflag.FlagSet)) []string {
 		}
 	})
 	return args
+}
+
+func TestValidateKubeletFlags(t *testing.T) {
+	tests := []struct {
+		name   string
+		error  bool
+		labels map[string]string
+	}{
+		{
+			name:  "Invalid kubernetes.io label",
+			error: true,
+			labels: map[string]string{
+				"beta.kubernetes.io/metadata-proxy-ready": "true",
+			},
+		},
+		{
+			name:  "Valid label outside of kubernetes.io and k8s.io",
+			error: false,
+			labels: map[string]string{
+				"cloud.google.com/metadata-proxy-ready": "true",
+			},
+		},
+		{
+			name:   "Empty label list",
+			error:  false,
+			labels: map[string]string{},
+		},
+		{
+			name:  "Invalid label",
+			error: true,
+			labels: map[string]string{
+				"cloud.google.com/repository": "kubernetes/kubernetes",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateKubeletFlags(&KubeletFlags{
+				ContainerRuntimeOptions: config.ContainerRuntimeOptions{},
+				NodeLabels:              tt.labels,
+			})
+
+			if tt.error && err == nil {
+				t.Errorf("ValidateKubeletFlags should have failed with labels: %+v", tt.labels)
+			}
+
+			if !tt.error && err != nil {
+				t.Errorf("ValidateKubeletFlags should not have failed with labels: %+v", tt.labels)
+			}
+		})
+	}
+
 }

@@ -23,32 +23,37 @@ set -o pipefail
 # Set locale to ensure english responses from kubectl commands
 export LANG=C
 
-KUBE_ROOT=$(dirname "${BASH_SOURCE}")/../..
+KUBE_ROOT=$(dirname "${BASH_SOURCE[0]}")/../..
 # Expects the following has already been done by whatever sources this script
 # source "${KUBE_ROOT}/hack/lib/init.sh"
 # source "${KUBE_ROOT}/hack/lib/test.sh"
 source "${KUBE_ROOT}/test/cmd/apply.sh"
 source "${KUBE_ROOT}/test/cmd/apps.sh"
+source "${KUBE_ROOT}/test/cmd/auth_whoami.sh"
+source "${KUBE_ROOT}/test/cmd/authentication.sh"
 source "${KUBE_ROOT}/test/cmd/authorization.sh"
 source "${KUBE_ROOT}/test/cmd/batch.sh"
 source "${KUBE_ROOT}/test/cmd/certificate.sh"
+source "${KUBE_ROOT}/test/cmd/convert.sh"
 source "${KUBE_ROOT}/test/cmd/core.sh"
 source "${KUBE_ROOT}/test/cmd/crd.sh"
 source "${KUBE_ROOT}/test/cmd/create.sh"
+source "${KUBE_ROOT}/test/cmd/debug.sh"
 source "${KUBE_ROOT}/test/cmd/delete.sh"
 source "${KUBE_ROOT}/test/cmd/diff.sh"
 source "${KUBE_ROOT}/test/cmd/discovery.sh"
+source "${KUBE_ROOT}/test/cmd/events.sh"
 source "${KUBE_ROOT}/test/cmd/exec.sh"
 source "${KUBE_ROOT}/test/cmd/generic-resources.sh"
 source "${KUBE_ROOT}/test/cmd/get.sh"
-source "${KUBE_ROOT}/test/cmd/kubeadm.sh"
+source "${KUBE_ROOT}/test/cmd/help.sh"
 source "${KUBE_ROOT}/test/cmd/kubeconfig.sh"
 source "${KUBE_ROOT}/test/cmd/node-management.sh"
-source "${KUBE_ROOT}/test/cmd/old-print.sh"
 source "${KUBE_ROOT}/test/cmd/plugins.sh"
 source "${KUBE_ROOT}/test/cmd/proxy.sh"
 source "${KUBE_ROOT}/test/cmd/rbac.sh"
 source "${KUBE_ROOT}/test/cmd/request-timeout.sh"
+source "${KUBE_ROOT}/test/cmd/results.sh"
 source "${KUBE_ROOT}/test/cmd/run.sh"
 source "${KUBE_ROOT}/test/cmd/save-config.sh"
 source "${KUBE_ROOT}/test/cmd/storage.sh"
@@ -59,33 +64,31 @@ source "${KUBE_ROOT}/test/cmd/wait.sh"
 
 ETCD_HOST=${ETCD_HOST:-127.0.0.1}
 ETCD_PORT=${ETCD_PORT:-2379}
-API_PORT=${API_PORT:-8080}
 SECURE_API_PORT=${SECURE_API_PORT:-6443}
 API_HOST=${API_HOST:-127.0.0.1}
 KUBELET_HEALTHZ_PORT=${KUBELET_HEALTHZ_PORT:-10248}
-CTLRMGR_PORT=${CTLRMGR_PORT:-10252}
+SECURE_CTLRMGR_PORT=${SECURE_CTLRMGR_PORT:-10257}
 PROXY_HOST=127.0.0.1 # kubectl only serves on localhost.
 
-IMAGE_NGINX="k8s.gcr.io/nginx:1.7.9"
-IMAGE_DEPLOYMENT_R1="k8s.gcr.io/nginx:test-cmd"  # deployment-revision1.yaml
-IMAGE_DEPLOYMENT_R2="$IMAGE_NGINX"  # deployment-revision2.yaml
-IMAGE_PERL="k8s.gcr.io/perl"
-IMAGE_PAUSE_V2="k8s.gcr.io/pause:2.0"
-IMAGE_DAEMONSET_R2="k8s.gcr.io/pause:latest"
-IMAGE_DAEMONSET_R2_2="k8s.gcr.io/nginx:test-cmd"  # rollingupdate-daemonset-rv2.yaml
-IMAGE_STATEFULSET_R1="k8s.gcr.io/nginx-slim:0.7"
-IMAGE_STATEFULSET_R2="k8s.gcr.io/nginx-slim:0.8"
+IMAGE_NGINX="registry.k8s.io/nginx:1.7.9"
+export IMAGE_DEPLOYMENT_R1="registry.k8s.io/nginx:test-cmd"  # deployment-revision1.yaml
+export IMAGE_DEPLOYMENT_R2="$IMAGE_NGINX"  # deployment-revision2.yaml
+export IMAGE_PERL="registry.k8s.io/perl"
+export IMAGE_PAUSE_V2="registry.k8s.io/pause:2.0"
+export IMAGE_DAEMONSET_R2="registry.k8s.io/pause:latest"
+export IMAGE_DAEMONSET_R2_2="registry.k8s.io/nginx:test-cmd"  # rollingupdate-daemonset-rv2.yaml
+export IMAGE_STATEFULSET_R1="registry.k8s.io/nginx-slim:0.7"
+export IMAGE_STATEFULSET_R2="registry.k8s.io/nginx-slim:0.8"
 
 # Expose kubectl directly for readability
-PATH="${KUBE_OUTPUT_HOSTBIN}":$PATH
+PATH="${THIS_PLATFORM_BIN}":$PATH
 
 # Define variables for resource types to prevent typos.
 clusterroles="clusterroles"
 configmaps="configmaps"
 csr="csr"
+cronjob="cronjobs"
 deployments="deployments"
-horizontalpodautoscalers="horizontalpodautoscalers"
-metrics="metrics"
 namespaces="namespaces"
 nodes="nodes"
 persistentvolumeclaims="persistentvolumeclaims"
@@ -96,18 +99,22 @@ replicasets="replicasets"
 replicationcontrollers="replicationcontrollers"
 roles="roles"
 secrets="secrets"
+selfsubjectreviews="selfsubjectreviews"
 serviceaccounts="serviceaccounts"
 services="services"
 statefulsets="statefulsets"
-static="static"
 storageclass="storageclass"
 subjectaccessreviews="subjectaccessreviews"
-selfsubjectaccessreviews="selfsubjectaccessreviews"
 customresourcedefinitions="customresourcedefinitions"
 daemonsets="daemonsets"
 controllerrevisions="controllerrevisions"
 job="jobs"
 
+# A junit-style XML test report will be generated in the directory specified by KUBE_JUNIT_REPORT_DIR, if set.
+# If KUBE_JUNIT_REPORT_DIR is unset, and ARTIFACTS is set, then use what is set in ARTIFACTS.
+if [[ -z "${KUBE_JUNIT_REPORT_DIR:-}" && -n "${ARTIFACTS:-}" ]]; then
+  export KUBE_JUNIT_REPORT_DIR="${ARTIFACTS}"
+fi
 
 # include shell2junit library
 sh2ju="${KUBE_ROOT}/third_party/forked/shell2junit/sh2ju.sh"
@@ -132,10 +139,18 @@ function record_command() {
     local name="$1"
     local output="${KUBE_JUNIT_REPORT_DIR:-/tmp/junit-results}"
     echo "Recording: ${name}"
-    echo "Running command: $@"
+    echo "Running command: $*"
     juLog -output="${output}" -class="test-cmd" -name="${name}" "$@"
-    if [[ $? -ne 0 ]]; then
-      echo "Error when running ${name}"
+    local exitCode=$?
+    if [[ ${exitCode} -ne 0 ]]; then
+      # Record failures for any non-canary commands
+      if [ "${name}" != "record_command_canary" ]; then
+        echo "Error when running ${name}"
+        foundError="${foundError}""${name}"", "
+      fi
+    elif [ "${name}" == "record_command_canary" ]; then
+      # If the canary command passed, fail
+      echo "record_command_canary succeeded unexpectedly"
       foundError="${foundError}""${name}"", "
     fi
 
@@ -143,12 +158,28 @@ function record_command() {
     set -o errexit
 }
 
+# Ensure our record_command stack correctly propagates and detects errexit failures in invoked commands - see https://issue.k8s.io/84871
+foundError=""
+function record_command_canary()
+{
+  set -o nounset
+  set -o errexit
+  bogus-expected-to-fail
+  set +o nounset
+  set +o errexit
+}
+KUBE_JUNIT_REPORT_DIR=$(mktemp -d /tmp/record_command_canary.XXXXX) record_command record_command_canary
+if [[ -n "${foundError}" ]]; then
+  echo "FAILED TESTS: record_command_canary"
+  exit 1
+fi
+
 # Stops the running kubectl proxy, if there is one.
 function stop-proxy()
 {
   [[ -n "${PROXY_PORT-}" ]] && kube::log::status "Stopping proxy on port ${PROXY_PORT}"
-  [[ -n "${PROXY_PID-}" ]] && kill "${PROXY_PID}" 1>&2 2>/dev/null
-  [[ -n "${PROXY_PORT_FILE-}" ]] && rm -f ${PROXY_PORT_FILE}
+  [[ -n "${PROXY_PID-}" ]] && kill -9 "${PROXY_PID}" 1>&2 2>/dev/null
+  [[ -n "${PROXY_PORT_FILE-}" ]] && rm -f "${PROXY_PORT_FILE}"
   PROXY_PID=
   PROXY_PORT=
   PROXY_PORT_FILE=
@@ -164,22 +195,22 @@ function start-proxy()
 
 
   if [ $# -eq 0 ]; then
-    kubectl proxy --port=0 --www=. 1>${PROXY_PORT_FILE} 2>&1 &
+    kubectl proxy --port=0 --www=. 1>"${PROXY_PORT_FILE}" 2>&1 &
   else
-    kubectl proxy --port=0 --www=. --api-prefix="$1" 1>${PROXY_PORT_FILE} 2>&1 &
+    kubectl proxy --port=0 --www=. --api-prefix="$1" 1>"${PROXY_PORT_FILE}" 2>&1 &
   fi
   PROXY_PID=$!
   PROXY_PORT=
 
   local attempts=0
   while [[ -z ${PROXY_PORT} ]]; do
-    if (( ${attempts} > 9 )); then
+    if (( attempts > 9 )); then
       kill "${PROXY_PID}"
-      kube::log::error_exit "Couldn't start proxy. Failed to read port after ${attempts} tries. Got: $(cat ${PROXY_PORT_FILE})"
+      kube::log::error_exit "Couldn't start proxy. Failed to read port after ${attempts} tries. Got: $(cat "${PROXY_PORT_FILE}")"
     fi
     sleep .5
     kube::log::status "Attempt ${attempts} to read ${PROXY_PORT_FILE}..."
-    PROXY_PORT=$(sed 's/.*Starting to serve on 127.0.0.1:\([0-9]*\)$/\1/'< ${PROXY_PORT_FILE})
+    PROXY_PORT=$(sed 's/.*Starting to serve on 127.0.0.1:\([0-9]*\)$/\1/'< "${PROXY_PORT_FILE}")
     attempts=$((attempts+1))
   done
 
@@ -196,16 +227,16 @@ function start-proxy()
 
 function cleanup()
 {
-  [[ -n "${APISERVER_PID-}" ]] && kill "${APISERVER_PID}" 1>&2 2>/dev/null
-  [[ -n "${CTLRMGR_PID-}" ]] && kill "${CTLRMGR_PID}" 1>&2 2>/dev/null
-  [[ -n "${KUBELET_PID-}" ]] && kill "${KUBELET_PID}" 1>&2 2>/dev/null
   stop-proxy
+  [[ -n "${CTLRMGR_PID-}" ]] && kill -9 "${CTLRMGR_PID}" 1>&2 2>/dev/null
+  [[ -n "${KUBELET_PID-}" ]] && kill -9 "${KUBELET_PID}" 1>&2 2>/dev/null
+  [[ -n "${APISERVER_PID-}" ]] && kill -9 "${APISERVER_PID}" 1>&2 2>/dev/null
 
   kube::etcd::cleanup
   rm -rf "${KUBE_TEMP}"
 
   local junit_dir="${KUBE_JUNIT_REPORT_DIR:-/tmp/junit-results}"
-  echo "junit report dir:" ${junit_dir}
+  echo "junit report dir:" "${junit_dir}"
 
   kube::log::status "Clean up complete"
 }
@@ -230,11 +261,11 @@ function check-curl-proxy-code()
 function kubectl-with-retry()
 {
   ERROR_FILE="${KUBE_TEMP}/kubectl-error"
-  preserve_err_file=${PRESERVE_ERR_FILE-false}
+  preserve_err_file=${PRESERVE_ERR_FILE:-false}
   for count in {0..3}; do
-    kubectl "$@" 2> ${ERROR_FILE} || true
+    kubectl "$@" 2> "${ERROR_FILE}" || true
     if grep -q "the object has been modified" "${ERROR_FILE}"; then
-      kube::log::status "retry $1, error: $(cat ${ERROR_FILE})"
+      kube::log::status "retry $1, error: $(cat "${ERROR_FILE}")"
       rm "${ERROR_FILE}"
       sleep $((2**count))
     else
@@ -256,12 +287,12 @@ function wait-for-pods-with-label()
 {
   local i
   for i in $(seq 1 10); do
-    kubeout=`kubectl get po -l $1 --output=go-template --template='{{range.items}}{{.metadata.name}}{{end}}' --sort-by metadata.name "${kube_flags[@]}"`
-    if [[ $kubeout = $2 ]]; then
+    kubeout=$(kubectl get po -l "$1" --output=go-template --template='{{range.items}}{{.metadata.name}}{{end}}' --sort-by metadata.name "${kube_flags[@]}")
+    if [[ $kubeout = "$2" ]]; then
         return
     fi
-    echo Waiting for pods: $2, found $kubeout
-    sleep $i
+    echo Waiting for pods: "$2", found "$kubeout"
+    sleep "$i"
   done
   kube::log::error_exit "Timeout waiting for pods with label $1"
 }
@@ -279,20 +310,33 @@ setup() {
   kube::util::ensure-gnu-sed
 
   kube::log::status "Building kubectl"
-  make -C "${KUBE_ROOT}" WHAT="cmd/kubectl"
+  make -C "${KUBE_ROOT}" WHAT="cmd/kubectl cmd/kubectl-convert"
 
   # Check kubectl
   kube::log::status "Running kubectl with no options"
-  "${KUBE_OUTPUT_HOSTBIN}/kubectl"
+  "${THIS_PLATFORM_BIN}/kubectl"
 
   # TODO: we need to note down the current default namespace and set back to this
   # namespace after the tests are done.
-  kubectl config view
   CONTEXT="test"
-  kubectl config set-context "${CONTEXT}"
+  kubectl config set-credentials test-admin --token admin-token
+  kubectl config set-cluster local --insecure-skip-tls-verify --server "https://127.0.0.1:${SECURE_API_PORT}"
+  kubectl config set-context "${CONTEXT}" --user test-admin --cluster local
   kubectl config use-context "${CONTEXT}"
+  kubectl config view
 
   kube::log::status "Setup complete"
+}
+
+# Generate a random namespace name, based on the current time (to make
+# debugging slightly easier) and a random number. Don't use `date +%N`
+# because that doesn't work on OSX.
+create_and_use_new_namespace() {
+  local ns_name
+  ns_name="namespace-$(date +%s)-${RANDOM}"
+  kube::log::status "Creating namespace ${ns_name}"
+  kubectl create namespace "${ns_name}"
+  kubectl config set-context "${CONTEXT}" --namespace="${ns_name}"
 }
 
 # Runs all kubectl tests.
@@ -308,72 +352,61 @@ runTests() {
   kube::log::status "Checking kubectl version"
   kubectl version
 
-  # Generate a random namespace name, based on the current time (to make
-  # debugging slightly easier) and a random number. Don't use `date +%N`
-  # because that doesn't work on OSX.
-  create_and_use_new_namespace() {
-    local ns_name
-    ns_name="namespace-$(date +%s)-${RANDOM}"
-    kube::log::status "Creating namespace ${ns_name}"
-    kubectl create namespace "${ns_name}"
-    kubectl config set-context "${CONTEXT}" --namespace="${ns_name}"
-  }
+  kube_flags=( '-s' "https://127.0.0.1:${SECURE_API_PORT}" '--insecure-skip-tls-verify' )
 
-  kube_flags=(
-    -s "http://127.0.0.1:${API_PORT}"
-  )
+  kube_flags_without_token=( "${kube_flags[@]}" )
 
   # token defined in hack/testdata/auth-tokens.csv
-  kube_flags_with_token=(
-    -s "https://127.0.0.1:${SECURE_API_PORT}" --token=admin-token --insecure-skip-tls-verify=true
-  )
+  kube_flags_with_token=( "${kube_flags_without_token[@]}" '--token=admin-token' )
 
   if [[ -z "${ALLOW_SKEW:-}" ]]; then
-    kube_flags+=("--match-server-version")
-    kube_flags_with_token+=("--match-server-version")
+    kube_flags+=('--match-server-version')
+    kube_flags_with_token+=('--match-server-version')
   fi
   if kube::test::if_supports_resource "${nodes}" ; then
     [ "$(kubectl get nodes -o go-template='{{ .apiVersion }}' "${kube_flags[@]}")" == "v1" ]
   fi
 
-  id_field=".metadata.name"
-  labels_field=".metadata.labels"
-  annotations_field=".metadata.annotations"
-  service_selector_field=".spec.selector"
-  rc_replicas_field=".spec.replicas"
-  rc_status_replicas_field=".status.replicas"
-  rc_container_image_field=".spec.template.spec.containers"
-  rs_replicas_field=".spec.replicas"
-  port_field="(index .spec.ports 0).port"
-  port_name="(index .spec.ports 0).name"
-  second_port_field="(index .spec.ports 1).port"
-  second_port_name="(index .spec.ports 1).name"
-  image_field="(index .spec.containers 0).image"
-  pod_container_name_field="(index .spec.containers 0).name"
-  container_name_field="(index .spec.template.spec.containers 0).name"
-  hpa_min_field=".spec.minReplicas"
-  hpa_max_field=".spec.maxReplicas"
-  hpa_cpu_field=".spec.targetCPUUtilizationPercentage"
-  template_labels=".spec.template.metadata.labels.name"
-  statefulset_replicas_field=".spec.replicas"
-  statefulset_observed_generation=".status.observedGeneration"
-  job_parallelism_field=".spec.parallelism"
-  deployment_replicas=".spec.replicas"
-  secret_data=".data"
-  secret_type=".type"
-  change_cause_annotation='.*kubernetes.io/change-cause.*'
-  pdb_min_available=".spec.minAvailable"
-  pdb_max_unavailable=".spec.maxUnavailable"
-  generation_field=".metadata.generation"
-  template_generation_field=".spec.templateGeneration"
-  container_len="(len .spec.template.spec.containers)"
-  image_field0="(index .spec.template.spec.containers 0).image"
-  image_field1="(index .spec.template.spec.containers 1).image"
+  # Define helper variables for fields to prevent typos.
+  # They will be used in some other files under test/cmd,
+  # Let's export them as https://github.com/koalaman/shellcheck/wiki/SC2034 suggested.
+  export id_field=".metadata.name"
+  export labels_field=".metadata.labels"
+  export annotations_field=".metadata.annotations"
+  export service_selector_field=".spec.selector"
+  export rc_replicas_field=".spec.replicas"
+  export rc_status_replicas_field=".status.replicas"
+  export rc_container_image_field=".spec.template.spec.containers"
+  export rs_replicas_field=".spec.replicas"
+  export port_field="(index .spec.ports 0).port"
+  export port_name="(index .spec.ports 0).name"
+  export second_port_field="(index .spec.ports 1).port"
+  export second_port_name="(index .spec.ports 1).name"
+  export image_field="(index .spec.containers 0).image"
+  export pod_container_name_field="(index .spec.containers 0).name"
+  export container_name_field="(index .spec.template.spec.containers 0).name"
+  export hpa_min_field=".spec.minReplicas"
+  export hpa_max_field=".spec.maxReplicas"
+  export hpa_cpu_field="(index .spec.metrics 0).resource.target.averageUtilization"
+  export template_labels=".spec.template.metadata.labels.name"
+  export statefulset_replicas_field=".spec.replicas"
+  export statefulset_observed_generation=".status.observedGeneration"
+  export job_parallelism_field=".spec.parallelism"
+  export deployment_replicas=".spec.replicas"
+  export secret_data=".data"
+  export secret_type=".type"
+  export change_cause_annotation='.*kubernetes.io/change-cause.*'
+  export pdb_min_available=".spec.minAvailable"
+  export pdb_max_unavailable=".spec.maxUnavailable"
+  export generation_field=".metadata.generation"
+  export container_len="(len .spec.template.spec.containers)"
+  export image_field0="(index .spec.template.spec.containers 0).image"
+  export image_field1="(index .spec.template.spec.containers 1).image"
 
   # Make sure "default" namespace exists.
   if kube::test::if_supports_resource "${namespaces}" ; then
     output_message=$(kubectl get "${kube_flags[@]}" namespaces)
-    if [[ ! $(echo "${output_message}" | grep "default") ]]; then
+    if ! grep -q "default" <<< "${output_message}"; then
       # Create default namespace
       kubectl create "${kube_flags[@]}" ns default
     fi
@@ -395,12 +428,12 @@ runTests() {
     fi
   }
 
-   if [[ -n "${WHAT-}" ]]; then
+  if [[ -n "${WHAT-}" ]]; then
     for pkg in ${WHAT}
-    do 
+    do
       # running of kubeadm is captured in hack/make-targets/test-cmd.sh
-      if [[ "${pkg}" != "kubeadm" ]]; then 
-        record_command run_${pkg}_tests
+      if [[ "${pkg}" != "kubeadm" ]]; then
+        record_command "run_${pkg}_tests"
       fi
     done
     cleanup_tests
@@ -413,11 +446,29 @@ runTests() {
 
   record_command run_kubectl_version_tests
 
+  ############################
+  # Kubectl result reporting #
+  ############################
+
+  record_command run_kubectl_results_tests
+
   #######################
   # kubectl config set #
   #######################
 
   record_command run_kubectl_config_set_tests
+
+  ##############################
+  # kubectl config set-cluster #
+  ##############################
+
+  record_command run_kubectl_config_set_cluster_tests
+
+  ##################################
+  # kubectl config set-credentials #
+  ##################################
+
+  record_command run_kubectl_config_set_credentials_tests
 
   #######################
   # kubectl local proxy #
@@ -455,7 +506,33 @@ runTests() {
   # Assert short name     #
   #########################
 
-  record_command run_assert_short_name_tests
+  if kube::test::if_supports_resource "${customresourcedefinitions}" && kube::test::if_supports_resource "${pods}" && kube::test::if_supports_resource "${configmaps}" ; then
+    record_command run_assert_short_name_tests
+  fi
+
+  #########################
+  # Assert singular name  #
+  #########################
+
+  if kube::test::if_supports_resource "${customresourcedefinitions}" && kube::test::if_supports_resource "${pods}" ; then
+    record_command run_assert_singular_name_tests
+  fi
+
+  #########################
+  # Ambiguous short name  #
+  #########################
+
+  if kube::test::if_supports_resource "${customresourcedefinitions}" ; then
+    record_command run_ambiguous_shortname_tests
+  fi
+
+  ################
+  # Explain crd  #
+  ################
+
+  if kube::test::if_supports_resource "${customresourcedefinitions}" ; then
+    record_command run_explain_crd_with_additional_properties_tests
+  fi
 
   #########################
   # Assert categories     #
@@ -484,6 +561,7 @@ runTests() {
 
   if kube::test::if_supports_resource "${pods}" ; then
     record_command run_kubectl_apply_tests
+    record_command run_kubectl_server_side_apply_tests
     record_command run_kubectl_run_tests
     record_command run_kubectl_create_filter_tests
   fi
@@ -504,7 +582,20 @@ runTests() {
 
   if kube::test::if_supports_resource "${pods}" ; then
     record_command run_kubectl_get_tests
-    record_command run_kubectl_old_print_tests
+  fi
+
+  ################
+  # Kubectl help #
+  ################
+
+  record_command run_kubectl_help_tests
+
+  ##################
+  # Kubectl events #
+  ##################
+
+  if kube::test::if_supports_resource "${cronjob}" ; then
+    record_command run_kubectl_events_tests
   fi
 
   ################
@@ -526,6 +617,14 @@ runTests() {
   fi
   if kube::test::if_supports_resource "${deployments}"; then
     record_command run_kubectl_create_kustomization_directory_tests
+    record_command run_kubectl_create_validate_tests
+  fi
+
+  ######################
+  # Convert            #
+  ######################
+  if kube::test::if_supports_resource "${deployments}"; then
+    record_command run_convert_tests
   fi
 
   ######################
@@ -533,6 +632,13 @@ runTests() {
   ######################
   if kube::test::if_supports_resource "${configmaps}" ; then
     record_command run_kubectl_delete_allnamespaces_tests
+  fi
+
+  ######################
+  # Delete --interactive   #
+  ######################
+  if kube::test::if_supports_resource "${configmaps}" ; then
+    record_command run_kubectl_delete_interactive_tests
   fi
 
   ##################
@@ -552,21 +658,12 @@ runTests() {
     record_command run_crd_tests
   fi
 
-  #################
-  # Run cmd w img #
-  #################
-
-  if kube::test::if_supports_resource "${deployments}" ; then
-    record_command run_cmd_with_img_tests
-  fi
-
-
   #####################################
   # Recursive Resources via directory #
   #####################################
 
   if kube::test::if_supports_resource "${pods}" ; then
-    run_recursive_resources_tests
+    record_command run_recursive_resources_tests
   fi
 
 
@@ -737,6 +834,16 @@ runTests() {
     record_command run_nodes_tests
   fi
 
+  ########################
+  # Authentication
+  ########################
+
+  record_command run_exec_credentials_tests
+  record_command run_exec_credentials_interactive_tests
+
+  if kube::test::if_supports_resource "${selfsubjectreviews}" ; then
+    record_command run_kubectl_auth_whoami_tests
+  fi
 
   ########################
   # authorization.k8s.io #
@@ -797,6 +904,14 @@ runTests() {
 
   # kubectl auth reconcile
   if kube::test::if_supports_resource "${clusterroles}" ; then
+    # dry-run command
+    kubectl auth reconcile --dry-run=client "${kube_flags[@]}" -f test/fixtures/pkg/kubectl/cmd/auth/rbac-resource-plus.yaml
+    kube::test::get_object_assert 'rolebindings -n some-other-random -l test-cmd=auth' "{{range.items}}{{$id_field}}:{{end}}" ''
+    kube::test::get_object_assert 'roles -n some-other-random -l test-cmd=auth' "{{range.items}}{{$id_field}}:{{end}}" ''
+    kube::test::get_object_assert 'clusterrolebindings -l test-cmd=auth' "{{range.items}}{{$id_field}}:{{end}}" ''
+    kube::test::get_object_assert 'clusterroles -l test-cmd=auth' "{{range.items}}{{$id_field}}:{{end}}" ''
+
+    # command
     kubectl auth reconcile "${kube_flags[@]}" -f test/fixtures/pkg/kubectl/cmd/auth/rbac-resource-plus.yaml
     kube::test::get_object_assert 'rolebindings -n some-other-random -l test-cmd=auth' "{{range.items}}{{$id_field}}:{{end}}" 'testing-RB:'
     kube::test::get_object_assert 'roles -n some-other-random -l test-cmd=auth' "{{range.items}}{{$id_field}}:{{end}}" 'testing-R:'
@@ -808,6 +923,8 @@ runTests() {
 
     kubectl delete "${kube_flags[@]}" rolebindings,role,clusterroles,clusterrolebindings -n some-other-random -l test-cmd=auth
   fi
+
+
 
   #####################
   # Retrieve multiple #
@@ -838,6 +955,13 @@ runTests() {
     record_command run_kubectl_explain_tests
   fi
 
+  ##############################
+  # CRD Deletion / Re-creation #
+  ##############################
+
+  if kube::test::if_supports_resource "${namespaces}" ; then
+      record_command run_crd_deletion_recreation_tests
+  fi
 
   ###########
   # Swagger #
@@ -862,6 +986,15 @@ runTests() {
       record_command run_kubectl_all_namespace_tests
     fi
   fi
+
+  ############################
+  # Kubectl deprecated APIs  #
+  ############################
+
+  if kube::test::if_supports_resource "${customresourcedefinitions}" ; then
+    record_command run_deprecated_api_tests
+  fi
+
 
   ######################
   # kubectl --template #
@@ -903,6 +1036,25 @@ runTests() {
   ####################
 
   record_command run_wait_tests
+
+  ####################
+  # kubectl debug    #
+  ####################
+  if kube::test::if_supports_resource "${pods}" ; then
+    record_command run_kubectl_debug_pod_tests
+    record_command run_kubectl_debug_general_tests
+    record_command run_kubectl_debug_baseline_tests
+    record_command run_kubectl_debug_restricted_tests
+    record_command run_kubectl_debug_netadmin_tests
+    record_command run_kubectl_debug_custom_profile_tests
+  fi
+  if kube::test::if_supports_resource "${nodes}" ; then
+    record_command run_kubectl_debug_node_tests
+    record_command run_kubectl_debug_general_node_tests
+    record_command run_kubectl_debug_baseline_node_tests
+    record_command run_kubectl_debug_restricted_node_tests
+    record_command run_kubectl_debug_netadmin_node_tests
+  fi
 
   cleanup_tests
 }

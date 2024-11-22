@@ -14,22 +14,28 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e_node
+package e2enode
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kubernetes/pkg/kubelet/apis/resourcemetrics/v1alpha1"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/test/e2e/framework"
-	"k8s.io/kubernetes/test/e2e/framework/metrics"
-	"k8s.io/kubernetes/test/e2e/framework/volume"
+	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
+	e2emetrics "k8s.io/kubernetes/test/e2e/framework/metrics"
+	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
+	e2evolume "k8s.io/kubernetes/test/e2e/framework/volume"
+	"k8s.io/kubernetes/test/e2e/nodefeature"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/prometheus/common/model"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/gstruct"
 	"github.com/onsi/gomega/types"
 )
@@ -40,100 +46,169 @@ const (
 	maxStatsAge = time.Minute
 )
 
-var _ = framework.KubeDescribe("ResourceMetricsAPI", func() {
+var _ = SIGDescribe("ResourceMetricsAPI", nodefeature.ResourceMetrics, func() {
 	f := framework.NewDefaultFramework("resource-metrics")
-	Context("when querying /resource/metrics", func() {
-		BeforeEach(func() {
-			By("Creating test pods")
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
+	ginkgo.Context("when querying /resource/metrics", func() {
+		ginkgo.BeforeEach(func(ctx context.Context) {
+			ginkgo.By("Creating test pods to measure their resource usage")
 			numRestarts := int32(1)
 			pods := getSummaryTestPods(f, numRestarts, pod0, pod1)
-			f.PodClient().CreateBatch(pods)
+			e2epod.NewPodClient(f).CreateBatch(ctx, pods)
 
-			By("Waiting for test pods to restart the desired number of times")
-			Eventually(func() error {
+			ginkgo.By("restarting the containers to ensure container metrics are still being gathered after a container is restarted")
+			gomega.Eventually(ctx, func(ctx context.Context) error {
 				for _, pod := range pods {
-					err := verifyPodRestartCount(f, pod.Name, len(pod.Spec.Containers), numRestarts)
+					err := verifyPodRestartCount(ctx, f, pod.Name, len(pod.Spec.Containers), numRestarts)
 					if err != nil {
 						return err
 					}
 				}
 				return nil
-			}, time.Minute, 5*time.Second).Should(Succeed())
+			}, time.Minute, 5*time.Second).Should(gomega.Succeed())
 
-			By("Waiting 15 seconds for cAdvisor to collect 2 stats points")
+			ginkgo.By("Waiting 15 seconds for cAdvisor to collect 2 stats points")
 			time.Sleep(15 * time.Second)
 		})
-		It("should report resource usage through the v1alpha1 resouce metrics api", func() {
-			By("Fetching node so we can know proper node memory bounds for unconstrained cgroups")
-			node := getLocalNode(f)
+		ginkgo.It("should report resource usage through the resource metrics api", func(ctx context.Context) {
+			ginkgo.By("Fetching node so we can match against an appropriate memory limit")
+			node := getLocalNode(ctx, f)
 			memoryCapacity := node.Status.Capacity["memory"]
 			memoryLimit := memoryCapacity.Value()
 
-			matchV1alpha1Expectations := gstruct.MatchAllKeys(gstruct.Keys{
-				"scrape_error": gstruct.Ignore(),
-				"node_cpu_usage_seconds_total": gstruct.MatchAllElements(nodeId, gstruct.Elements{
-					"": boundedSample(1, 1E6),
+			keys := []string{
+				"resource_scrape_error", "node_cpu_usage_seconds_total", "node_memory_working_set_bytes",
+				"pod_cpu_usage_seconds_total", "pod_memory_working_set_bytes",
+			}
+
+			// NOTE: This check should be removed when ListMetricDescriptors is implemented
+			// by CRI-O and Containerd
+			if !e2eskipper.IsFeatureGateEnabled(features.PodAndContainerStatsFromCRI) {
+				keys = append(keys, "container_cpu_usage_seconds_total", "container_memory_working_set_bytes", "container_start_time_seconds")
+			}
+
+			matchResourceMetrics := gomega.And(gstruct.MatchKeys(gstruct.IgnoreMissing, gstruct.Keys{
+				"resource_scrape_error": gstruct.Ignore(),
+				"node_cpu_usage_seconds_total": gstruct.MatchAllElements(nodeID, gstruct.Elements{
+					"": boundedSample(1, 1e6),
 				}),
-				"node_memory_working_set_bytes": gstruct.MatchAllElements(nodeId, gstruct.Elements{
-					"": boundedSample(10*volume.Mb, memoryLimit),
+				"node_memory_working_set_bytes": gstruct.MatchAllElements(nodeID, gstruct.Elements{
+					"": boundedSample(10*e2evolume.Mb, memoryLimit),
 				}),
 
-				"container_cpu_usage_seconds_total": gstruct.MatchElements(containerId, gstruct.IgnoreExtras, gstruct.Elements{
+				"container_cpu_usage_seconds_total": gstruct.MatchElements(containerID, gstruct.IgnoreExtras, gstruct.Elements{
 					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod0, "busybox-container"): boundedSample(0, 100),
 					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod1, "busybox-container"): boundedSample(0, 100),
 				}),
 
-				"container_memory_working_set_bytes": gstruct.MatchAllElements(containerId, gstruct.Elements{
-					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod0, "busybox-container"): boundedSample(10*volume.Kb, 80*volume.Mb),
-					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod1, "busybox-container"): boundedSample(10*volume.Kb, 80*volume.Mb),
+				"container_memory_working_set_bytes": gstruct.MatchElements(containerID, gstruct.IgnoreExtras, gstruct.Elements{
+					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod0, "busybox-container"): boundedSample(10*e2evolume.Kb, 80*e2evolume.Mb),
+					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod1, "busybox-container"): boundedSample(10*e2evolume.Kb, 80*e2evolume.Mb),
 				}),
-			})
-			By("Giving pods a minute to start up and produce metrics")
-			Eventually(getV1alpha1ResourceMetrics, 1*time.Minute, 15*time.Second).Should(matchV1alpha1Expectations)
-			By("Ensuring the metrics match the expectations a few more times")
-			Consistently(getV1alpha1ResourceMetrics, 1*time.Minute, 15*time.Second).Should(matchV1alpha1Expectations)
+
+				"container_start_time_seconds": gstruct.MatchElements(containerID, gstruct.IgnoreExtras, gstruct.Elements{
+					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod0, "busybox-container"): boundedSample(time.Now().Add(-maxStatsAge).Unix(), time.Now().Add(2*time.Minute).Unix()),
+					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod1, "busybox-container"): boundedSample(time.Now().Add(-maxStatsAge).Unix(), time.Now().Add(2*time.Minute).Unix()),
+				}),
+
+				"pod_cpu_usage_seconds_total": gstruct.MatchElements(podID, gstruct.IgnoreExtras, gstruct.Elements{
+					fmt.Sprintf("%s::%s", f.Namespace.Name, pod0): boundedSample(0, 100),
+					fmt.Sprintf("%s::%s", f.Namespace.Name, pod1): boundedSample(0, 100),
+				}),
+
+				"pod_memory_working_set_bytes": gstruct.MatchElements(podID, gstruct.IgnoreExtras, gstruct.Elements{
+					fmt.Sprintf("%s::%s", f.Namespace.Name, pod0): boundedSample(10*e2evolume.Kb, 80*e2evolume.Mb),
+					fmt.Sprintf("%s::%s", f.Namespace.Name, pod1): boundedSample(10*e2evolume.Kb, 80*e2evolume.Mb),
+				}),
+
+				"pod_swap_usage_bytes": gstruct.MatchElements(podID, gstruct.IgnoreExtras, gstruct.Elements{
+					fmt.Sprintf("%s::%s", f.Namespace.Name, pod0): boundedSample(0*e2evolume.Kb, 80*e2evolume.Mb),
+					fmt.Sprintf("%s::%s", f.Namespace.Name, pod1): boundedSample(0*e2evolume.Kb, 80*e2evolume.Mb),
+				}),
+			}),
+				haveKeys(keys...),
+			)
+			ginkgo.By("Giving pods a minute to start up and produce metrics")
+			gomega.Eventually(ctx, getResourceMetrics, 1*time.Minute, 15*time.Second).Should(matchResourceMetrics)
+			ginkgo.By("Ensuring the metrics match the expectations a few more times")
+			gomega.Consistently(ctx, getResourceMetrics, 1*time.Minute, 15*time.Second).Should(matchResourceMetrics)
 		})
-		AfterEach(func() {
-			By("Deleting test pods")
-			f.PodClient().DeleteSync(pod0, &metav1.DeleteOptions{}, 10*time.Minute)
-			f.PodClient().DeleteSync(pod1, &metav1.DeleteOptions{}, 10*time.Minute)
-			if !CurrentGinkgoTestDescription().Failed {
+		ginkgo.AfterEach(func(ctx context.Context) {
+			ginkgo.By("Deleting test pods")
+			var zero int64 = 0
+			e2epod.NewPodClient(f).DeleteSync(ctx, pod0, metav1.DeleteOptions{GracePeriodSeconds: &zero}, 10*time.Minute)
+			e2epod.NewPodClient(f).DeleteSync(ctx, pod1, metav1.DeleteOptions{GracePeriodSeconds: &zero}, 10*time.Minute)
+			if !ginkgo.CurrentSpecReport().Failed() {
 				return
 			}
 			if framework.TestContext.DumpLogsOnFailure {
-				framework.LogFailedContainers(f.ClientSet, f.Namespace.Name, framework.Logf)
+				e2ekubectl.LogFailedContainers(ctx, f.ClientSet, f.Namespace.Name, framework.Logf)
 			}
-			By("Recording processes in system cgroups")
-			recordSystemCgroupProcesses()
+			ginkgo.By("Recording processes in system cgroups")
+			recordSystemCgroupProcesses(ctx)
 		})
 	})
 })
 
-func getV1alpha1ResourceMetrics() (metrics.KubeletMetrics, error) {
-	return metrics.GrabKubeletMetricsWithoutProxy(framework.TestContext.NodeName+":10255", "/metrics/resource/"+v1alpha1.Version)
+func getResourceMetrics(ctx context.Context) (e2emetrics.KubeletMetrics, error) {
+	ginkgo.By("getting stable resource metrics API")
+	return e2emetrics.GrabKubeletMetricsWithoutProxy(ctx, nodeNameOrIP()+":10255", "/metrics/resource")
 }
 
-func nodeId(element interface{}) string {
+func nodeID(element interface{}) string {
 	return ""
 }
 
-func containerId(element interface{}) string {
+func podID(element interface{}) string {
+	el := element.(*model.Sample)
+	return fmt.Sprintf("%s::%s", el.Metric["namespace"], el.Metric["pod"])
+}
+
+func containerID(element interface{}) string {
 	el := element.(*model.Sample)
 	return fmt.Sprintf("%s::%s::%s", el.Metric["namespace"], el.Metric["pod"], el.Metric["container"])
+}
+
+func makeCustomPairID(pri, sec string) func(interface{}) string {
+	return func(element interface{}) string {
+		el := element.(*model.Sample)
+		return fmt.Sprintf("%s::%s", el.Metric[model.LabelName(pri)], el.Metric[model.LabelName(sec)])
+	}
 }
 
 func boundedSample(lower, upper interface{}) types.GomegaMatcher {
 	return gstruct.PointTo(gstruct.MatchAllFields(gstruct.Fields{
 		// We already check Metric when matching the Id
 		"Metric": gstruct.Ignore(),
-		"Value":  And(BeNumerically(">=", lower), BeNumerically("<=", upper)),
-		"Timestamp": WithTransform(func(t model.Time) time.Time {
+		"Value":  gomega.And(gomega.BeNumerically(">=", lower), gomega.BeNumerically("<=", upper)),
+		"Timestamp": gomega.WithTransform(func(t model.Time) time.Time {
+			if t.Unix() <= 0 {
+				return time.Now()
+			}
+
 			// model.Time is in Milliseconds since epoch
 			return time.Unix(0, int64(t)*int64(time.Millisecond))
 		},
-			And(
-				BeTemporally(">=", time.Now().Add(-maxStatsAge)),
+			gomega.And(
+				gomega.BeTemporally(">=", time.Now().Add(-maxStatsAge)),
 				// Now() is the test start time, not the match time, so permit a few extra minutes.
-				BeTemporally("<", time.Now().Add(2*time.Minute))),
-		)}))
+				gomega.BeTemporally("<", time.Now().Add(2*time.Minute))),
+		),
+		"Histogram": gstruct.Ignore(),
+	}))
+}
+
+func haveKeys(keys ...string) types.GomegaMatcher {
+	gomega.ExpectWithOffset(1, keys).ToNot(gomega.BeEmpty())
+	matcher := gomega.HaveKey(keys[0])
+
+	if len(keys) == 1 {
+		return matcher
+	}
+
+	for _, key := range keys[1:] {
+		matcher = gomega.And(matcher, gomega.HaveKey(key))
+	}
+
+	return matcher
 }

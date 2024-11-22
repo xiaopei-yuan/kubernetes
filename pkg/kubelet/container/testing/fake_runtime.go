@@ -18,23 +18,26 @@ package testing
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/url"
 	"reflect"
 	"sync"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/flowcontrol"
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
-	. "k8s.io/kubernetes/pkg/kubelet/container"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
+	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/volume"
 )
 
+type TB interface {
+	Errorf(format string, args ...any)
+}
+
 type FakePod struct {
-	Pod       *Pod
+	Pod       *kubecontainer.Pod
 	NetnsPath string
 }
 
@@ -44,20 +47,28 @@ type FakeRuntime struct {
 	CalledFunctions   []string
 	PodList           []*FakePod
 	AllPodList        []*FakePod
-	ImageList         []Image
+	ImageList         []kubecontainer.Image
+	ImageFsStats      []*runtimeapi.FilesystemUsage
+	ContainerFsStats  []*runtimeapi.FilesystemUsage
 	APIPodStatus      v1.PodStatus
-	PodStatus         PodStatus
+	PodStatus         kubecontainer.PodStatus
 	StartedPods       []string
 	KilledPods        []string
 	StartedContainers []string
 	KilledContainers  []string
-	RuntimeStatus     *RuntimeStatus
+	RuntimeStatus     *kubecontainer.RuntimeStatus
 	VersionInfo       string
 	APIVersionInfo    string
 	RuntimeType       string
 	Err               error
 	InspectErr        error
 	StatusErr         error
+	// If BlockImagePulls is true, then all PullImage() calls will be blocked until
+	// UnblockImagePulls() is called. This is used to simulate image pull latency
+	// from container runtime.
+	BlockImagePulls      bool
+	imagePullTokenBucket chan bool
+	T                    TB
 }
 
 const FakeHost = "localhost:12345"
@@ -66,10 +77,10 @@ type FakeStreamingRuntime struct {
 	*FakeRuntime
 }
 
-var _ StreamingRuntime = &FakeStreamingRuntime{}
+var _ kubecontainer.StreamingRuntime = &FakeStreamingRuntime{}
 
 // FakeRuntime should implement Runtime.
-var _ Runtime = &FakeRuntime{}
+var _ kubecontainer.Runtime = &FakeRuntime{}
 
 type FakeVersion struct {
 	Version string
@@ -90,84 +101,81 @@ func (fv *FakeVersion) Compare(other string) (int, error) {
 }
 
 type podsGetter interface {
-	GetPods(bool) ([]*Pod, error)
+	GetPods(context.Context, bool) ([]*kubecontainer.Pod, error)
 }
 
 type FakeRuntimeCache struct {
 	getter podsGetter
 }
 
-func NewFakeRuntimeCache(getter podsGetter) RuntimeCache {
+func NewFakeRuntimeCache(getter podsGetter) kubecontainer.RuntimeCache {
 	return &FakeRuntimeCache{getter}
 }
 
-func (f *FakeRuntimeCache) GetPods() ([]*Pod, error) {
-	return f.getter.GetPods(false)
+func (f *FakeRuntimeCache) GetPods(ctx context.Context) ([]*kubecontainer.Pod, error) {
+	return f.getter.GetPods(ctx, false)
 }
 
-func (f *FakeRuntimeCache) ForceUpdateIfOlder(time.Time) error {
+func (f *FakeRuntimeCache) ForceUpdateIfOlder(context.Context, time.Time) error {
 	return nil
-}
-
-// ClearCalls resets the FakeRuntime to the initial state.
-func (f *FakeRuntime) ClearCalls() {
-	f.Lock()
-	defer f.Unlock()
-
-	f.CalledFunctions = []string{}
-	f.PodList = []*FakePod{}
-	f.AllPodList = []*FakePod{}
-	f.APIPodStatus = v1.PodStatus{}
-	f.StartedPods = []string{}
-	f.KilledPods = []string{}
-	f.StartedContainers = []string{}
-	f.KilledContainers = []string{}
-	f.RuntimeStatus = nil
-	f.VersionInfo = ""
-	f.RuntimeType = ""
-	f.Err = nil
-	f.InspectErr = nil
-	f.StatusErr = nil
 }
 
 // UpdatePodCIDR fulfills the cri interface.
-func (f *FakeRuntime) UpdatePodCIDR(c string) error {
+func (f *FakeRuntime) UpdatePodCIDR(_ context.Context, c string) error {
 	return nil
 }
 
-func (f *FakeRuntime) assertList(expect []string, test []string) error {
+func (f *FakeRuntime) assertList(expect []string, test []string) bool {
 	if !reflect.DeepEqual(expect, test) {
-		return fmt.Errorf("expected %#v, got %#v", expect, test)
+		f.T.Errorf("AssertList: expected %#v, got %#v", expect, test)
+		return false
 	}
-	return nil
+	return true
 }
 
 // AssertCalls test if the invoked functions are as expected.
-func (f *FakeRuntime) AssertCalls(calls []string) error {
+func (f *FakeRuntime) AssertCalls(calls []string) bool {
 	f.Lock()
 	defer f.Unlock()
 	return f.assertList(calls, f.CalledFunctions)
 }
 
-func (f *FakeRuntime) AssertStartedPods(pods []string) error {
+// AssertCallCounts checks if a certain call is called for a certain of numbers
+func (f *FakeRuntime) AssertCallCounts(funcName string, expectedCount int) bool {
+	f.Lock()
+	defer f.Unlock()
+	actualCount := 0
+	for _, c := range f.CalledFunctions {
+		if funcName == c {
+			actualCount += 1
+		}
+	}
+	if expectedCount != actualCount {
+		f.T.Errorf("AssertCallCounts: expected %s to be called %d times, but was actually called %d times.", funcName, expectedCount, actualCount)
+		return false
+	}
+	return true
+}
+
+func (f *FakeRuntime) AssertStartedPods(pods []string) bool {
 	f.Lock()
 	defer f.Unlock()
 	return f.assertList(pods, f.StartedPods)
 }
 
-func (f *FakeRuntime) AssertKilledPods(pods []string) error {
+func (f *FakeRuntime) AssertKilledPods(pods []string) bool {
 	f.Lock()
 	defer f.Unlock()
 	return f.assertList(pods, f.KilledPods)
 }
 
-func (f *FakeRuntime) AssertStartedContainers(containers []string) error {
+func (f *FakeRuntime) AssertStartedContainers(containers []string) bool {
 	f.Lock()
 	defer f.Unlock()
 	return f.assertList(containers, f.StartedContainers)
 }
 
-func (f *FakeRuntime) AssertKilledContainers(containers []string) error {
+func (f *FakeRuntime) AssertKilledContainers(containers []string) bool {
 	f.Lock()
 	defer f.Unlock()
 	return f.assertList(containers, f.KilledContainers)
@@ -177,7 +185,7 @@ func (f *FakeRuntime) Type() string {
 	return f.RuntimeType
 }
 
-func (f *FakeRuntime) Version() (Version, error) {
+func (f *FakeRuntime) Version(_ context.Context) (kubecontainer.Version, error) {
 	f.Lock()
 	defer f.Unlock()
 
@@ -185,7 +193,7 @@ func (f *FakeRuntime) Version() (Version, error) {
 	return &FakeVersion{Version: f.VersionInfo}, f.Err
 }
 
-func (f *FakeRuntime) APIVersion() (Version, error) {
+func (f *FakeRuntime) APIVersion() (kubecontainer.Version, error) {
 	f.Lock()
 	defer f.Unlock()
 
@@ -193,7 +201,7 @@ func (f *FakeRuntime) APIVersion() (Version, error) {
 	return &FakeVersion{Version: f.APIVersionInfo}, f.Err
 }
 
-func (f *FakeRuntime) Status() (*RuntimeStatus, error) {
+func (f *FakeRuntime) Status(_ context.Context) (*kubecontainer.RuntimeStatus, error) {
 	f.Lock()
 	defer f.Unlock()
 
@@ -201,11 +209,11 @@ func (f *FakeRuntime) Status() (*RuntimeStatus, error) {
 	return f.RuntimeStatus, f.StatusErr
 }
 
-func (f *FakeRuntime) GetPods(all bool) ([]*Pod, error) {
+func (f *FakeRuntime) GetPods(_ context.Context, all bool) ([]*kubecontainer.Pod, error) {
 	f.Lock()
 	defer f.Unlock()
 
-	var pods []*Pod
+	var pods []*kubecontainer.Pod
 
 	f.CalledFunctions = append(f.CalledFunctions, "GetPods")
 	if all {
@@ -220,7 +228,7 @@ func (f *FakeRuntime) GetPods(all bool) ([]*Pod, error) {
 	return pods, f.Err
 }
 
-func (f *FakeRuntime) SyncPod(pod *v1.Pod, _ *PodStatus, _ []v1.Secret, backOff *flowcontrol.Backoff) (result PodSyncResult) {
+func (f *FakeRuntime) SyncPod(_ context.Context, pod *v1.Pod, _ *kubecontainer.PodStatus, _ []v1.Secret, backOff *flowcontrol.Backoff) (result kubecontainer.PodSyncResult) {
 	f.Lock()
 	defer f.Unlock()
 
@@ -236,7 +244,7 @@ func (f *FakeRuntime) SyncPod(pod *v1.Pod, _ *PodStatus, _ []v1.Secret, backOff 
 	return
 }
 
-func (f *FakeRuntime) KillPod(pod *v1.Pod, runningPod Pod, gracePeriodOverride *int64) error {
+func (f *FakeRuntime) KillPod(_ context.Context, pod *v1.Pod, runningPod kubecontainer.Pod, gracePeriodOverride *int64) error {
 	f.Lock()
 	defer f.Unlock()
 
@@ -271,18 +279,19 @@ func (f *FakeRuntime) KillContainerInPod(container v1.Container, pod *v1.Pod) er
 
 	f.CalledFunctions = append(f.CalledFunctions, "KillContainerInPod")
 	f.KilledContainers = append(f.KilledContainers, container.Name)
-
-	var containers []v1.Container
-	for _, c := range pod.Spec.Containers {
-		if c.Name == container.Name {
-			continue
-		}
-		containers = append(containers, c)
-	}
 	return f.Err
 }
 
-func (f *FakeRuntime) GetPodStatus(uid types.UID, name, namespace string) (*PodStatus, error) {
+func (f *FakeRuntime) GeneratePodStatus(event *runtimeapi.ContainerEventResponse) (*kubecontainer.PodStatus, error) {
+	f.Lock()
+	defer f.Unlock()
+
+	f.CalledFunctions = append(f.CalledFunctions, "GeneratePodStatus")
+	status := f.PodStatus
+	return &status, f.Err
+}
+
+func (f *FakeRuntime) GetPodStatus(_ context.Context, uid types.UID, name, namespace string) (*kubecontainer.PodStatus, error) {
 	f.Lock()
 	defer f.Unlock()
 
@@ -291,7 +300,7 @@ func (f *FakeRuntime) GetPodStatus(uid types.UID, name, namespace string) (*PodS
 	return &status, f.Err
 }
 
-func (f *FakeRuntime) GetContainerLogs(_ context.Context, pod *v1.Pod, containerID ContainerID, logOptions *v1.PodLogOptions, stdout, stderr io.Writer) (err error) {
+func (f *FakeRuntime) GetContainerLogs(_ context.Context, pod *v1.Pod, containerID kubecontainer.ContainerID, logOptions *v1.PodLogOptions, stdout, stderr io.Writer) (err error) {
 	f.Lock()
 	defer f.Unlock()
 
@@ -299,15 +308,48 @@ func (f *FakeRuntime) GetContainerLogs(_ context.Context, pod *v1.Pod, container
 	return f.Err
 }
 
-func (f *FakeRuntime) PullImage(image ImageSpec, pullSecrets []v1.Secret, podSandboxConfig *runtimeapi.PodSandboxConfig) (string, error) {
+func (f *FakeRuntime) PullImage(ctx context.Context, image kubecontainer.ImageSpec, pullSecrets []v1.Secret, podSandboxConfig *runtimeapi.PodSandboxConfig) (string, error) {
 	f.Lock()
-	defer f.Unlock()
-
 	f.CalledFunctions = append(f.CalledFunctions, "PullImage")
-	return image.Image, f.Err
+	if f.Err == nil {
+		i := kubecontainer.Image{
+			ID:   image.Image,
+			Spec: image,
+		}
+		f.ImageList = append(f.ImageList, i)
+	}
+
+	if !f.BlockImagePulls {
+		f.Unlock()
+		return image.Image, f.Err
+	}
+
+	retErr := f.Err
+	if f.imagePullTokenBucket == nil {
+		f.imagePullTokenBucket = make(chan bool, 1)
+	}
+	// Unlock before waiting for UnblockImagePulls calls, to avoid deadlock.
+	f.Unlock()
+	select {
+	case <-ctx.Done():
+	case <-f.imagePullTokenBucket:
+	}
+	return image.Image, retErr
 }
 
-func (f *FakeRuntime) GetImageRef(image ImageSpec) (string, error) {
+// UnblockImagePulls unblocks a certain number of image pulls, if BlockImagePulls is true.
+func (f *FakeRuntime) UnblockImagePulls(count int) {
+	if f.imagePullTokenBucket != nil {
+		for i := 0; i < count; i++ {
+			select {
+			case f.imagePullTokenBucket <- true:
+			default:
+			}
+		}
+	}
+}
+
+func (f *FakeRuntime) GetImageRef(_ context.Context, image kubecontainer.ImageSpec) (string, error) {
 	f.Lock()
 	defer f.Unlock()
 
@@ -320,15 +362,29 @@ func (f *FakeRuntime) GetImageRef(image ImageSpec) (string, error) {
 	return "", f.InspectErr
 }
 
-func (f *FakeRuntime) ListImages() ([]Image, error) {
+func (f *FakeRuntime) GetImageSize(_ context.Context, image kubecontainer.ImageSpec) (uint64, error) {
+	f.Lock()
+	defer f.Unlock()
+
+	f.CalledFunctions = append(f.CalledFunctions, "GetImageSize")
+	return 0, f.Err
+}
+
+func (f *FakeRuntime) ListImages(_ context.Context) ([]kubecontainer.Image, error) {
 	f.Lock()
 	defer f.Unlock()
 
 	f.CalledFunctions = append(f.CalledFunctions, "ListImages")
-	return f.ImageList, f.Err
+	return snapshot(f.ImageList), f.Err
 }
 
-func (f *FakeRuntime) RemoveImage(image ImageSpec) error {
+func snapshot(imageList []kubecontainer.Image) []kubecontainer.Image {
+	result := make([]kubecontainer.Image, len(imageList))
+	copy(result, imageList)
+	return result
+}
+
+func (f *FakeRuntime) RemoveImage(_ context.Context, image kubecontainer.ImageSpec) error {
 	f.Lock()
 	defer f.Unlock()
 
@@ -345,7 +401,7 @@ func (f *FakeRuntime) RemoveImage(image ImageSpec) error {
 	return f.Err
 }
 
-func (f *FakeRuntime) GarbageCollect(gcPolicy ContainerGCPolicy, ready bool, evictNonDeletedPods bool) error {
+func (f *FakeRuntime) GarbageCollect(_ context.Context, gcPolicy kubecontainer.GCPolicy, ready bool, evictNonDeletedPods bool) error {
 	f.Lock()
 	defer f.Unlock()
 
@@ -353,7 +409,7 @@ func (f *FakeRuntime) GarbageCollect(gcPolicy ContainerGCPolicy, ready bool, evi
 	return f.Err
 }
 
-func (f *FakeRuntime) DeleteContainer(containerID ContainerID) error {
+func (f *FakeRuntime) DeleteContainer(_ context.Context, containerID kubecontainer.ContainerID) error {
 	f.Lock()
 	defer f.Unlock()
 
@@ -361,7 +417,41 @@ func (f *FakeRuntime) DeleteContainer(containerID ContainerID) error {
 	return f.Err
 }
 
-func (f *FakeRuntime) ImageStats() (*ImageStats, error) {
+func (f *FakeRuntime) CheckpointContainer(_ context.Context, options *runtimeapi.CheckpointContainerRequest) error {
+	f.Lock()
+	defer f.Unlock()
+
+	f.CalledFunctions = append(f.CalledFunctions, "CheckpointContainer")
+	return f.Err
+}
+
+func (f *FakeRuntime) ListMetricDescriptors(_ context.Context) ([]*runtimeapi.MetricDescriptor, error) {
+	f.Lock()
+	defer f.Unlock()
+
+	f.CalledFunctions = append(f.CalledFunctions, "ListMetricDescriptors")
+	return nil, f.Err
+}
+
+func (f *FakeRuntime) ListPodSandboxMetrics(_ context.Context) ([]*runtimeapi.PodSandboxMetrics, error) {
+	f.Lock()
+	defer f.Unlock()
+
+	f.CalledFunctions = append(f.CalledFunctions, "ListPodSandboxMetrics")
+	return nil, f.Err
+}
+
+// SetContainerFsStats sets the containerFsStats for dependency injection.
+func (f *FakeRuntime) SetContainerFsStats(val []*runtimeapi.FilesystemUsage) {
+	f.ContainerFsStats = val
+}
+
+// SetImageFsStats sets the ImageFsStats for dependency injection.
+func (f *FakeRuntime) SetImageFsStats(val []*runtimeapi.FilesystemUsage) {
+	f.ImageFsStats = val
+}
+
+func (f *FakeRuntime) ImageStats(_ context.Context) (*kubecontainer.ImageStats, error) {
 	f.Lock()
 	defer f.Unlock()
 
@@ -369,7 +459,21 @@ func (f *FakeRuntime) ImageStats() (*ImageStats, error) {
 	return nil, f.Err
 }
 
-func (f *FakeStreamingRuntime) GetExec(id ContainerID, cmd []string, stdin, stdout, stderr, tty bool) (*url.URL, error) {
+// ImageFsInfo returns a ImageFsInfoResponse given the DI injected values of ImageFsStats
+// and ContainerFsStats.
+func (f *FakeRuntime) ImageFsInfo(_ context.Context) (*runtimeapi.ImageFsInfoResponse, error) {
+	f.Lock()
+	defer f.Unlock()
+
+	f.CalledFunctions = append(f.CalledFunctions, "ImageFsInfo")
+	resp := &runtimeapi.ImageFsInfoResponse{
+		ImageFilesystems:     f.ImageFsStats,
+		ContainerFilesystems: f.ContainerFsStats,
+	}
+	return resp, f.Err
+}
+
+func (f *FakeStreamingRuntime) GetExec(_ context.Context, id kubecontainer.ContainerID, cmd []string, stdin, stdout, stderr, tty bool) (*url.URL, error) {
 	f.Lock()
 	defer f.Unlock()
 
@@ -377,7 +481,7 @@ func (f *FakeStreamingRuntime) GetExec(id ContainerID, cmd []string, stdin, stdo
 	return &url.URL{Host: FakeHost}, f.Err
 }
 
-func (f *FakeStreamingRuntime) GetAttach(id ContainerID, stdin, stdout, stderr, tty bool) (*url.URL, error) {
+func (f *FakeStreamingRuntime) GetAttach(_ context.Context, id kubecontainer.ContainerID, stdin, stdout, stderr, tty bool) (*url.URL, error) {
 	f.Lock()
 	defer f.Unlock()
 
@@ -385,7 +489,7 @@ func (f *FakeStreamingRuntime) GetAttach(id ContainerID, stdin, stdout, stderr, 
 	return &url.URL{Host: FakeHost}, f.Err
 }
 
-func (f *FakeStreamingRuntime) GetPortForward(podName, podNamespace string, podUID types.UID, ports []int32) (*url.URL, error) {
+func (f *FakeStreamingRuntime) GetPortForward(_ context.Context, podName, podNamespace string, podUID types.UID, ports []int32) (*url.URL, error) {
 	f.Lock()
 	defer f.Unlock()
 
@@ -399,16 +503,24 @@ type FakeContainerCommandRunner struct {
 	Err    error
 
 	// actual values when invoked
-	ContainerID ContainerID
+	ContainerID kubecontainer.ContainerID
 	Cmd         []string
 }
 
-var _ ContainerCommandRunner = &FakeContainerCommandRunner{}
+var _ kubecontainer.CommandRunner = &FakeContainerCommandRunner{}
 
-func (f *FakeContainerCommandRunner) RunInContainer(containerID ContainerID, cmd []string, timeout time.Duration) ([]byte, error) {
+func (f *FakeContainerCommandRunner) RunInContainer(_ context.Context, containerID kubecontainer.ContainerID, cmd []string, timeout time.Duration) ([]byte, error) {
 	// record invoked values
 	f.ContainerID = containerID
 	f.Cmd = cmd
 
 	return []byte(f.Stdout), f.Err
+}
+
+func (f *FakeRuntime) GetContainerStatus(_ context.Context, _ kubecontainer.ContainerID) (status *kubecontainer.Status, err error) {
+	f.Lock()
+	defer f.Unlock()
+
+	f.CalledFunctions = append(f.CalledFunctions, "GetContainerStatus")
+	return nil, f.Err
 }

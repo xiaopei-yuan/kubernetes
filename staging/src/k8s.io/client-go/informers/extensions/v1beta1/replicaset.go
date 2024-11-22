@@ -19,15 +19,16 @@ limitations under the License.
 package v1beta1
 
 import (
+	context "context"
 	time "time"
 
-	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
+	apiextensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
 	internalinterfaces "k8s.io/client-go/informers/internalinterfaces"
 	kubernetes "k8s.io/client-go/kubernetes"
-	v1beta1 "k8s.io/client-go/listers/extensions/v1beta1"
+	extensionsv1beta1 "k8s.io/client-go/listers/extensions/v1beta1"
 	cache "k8s.io/client-go/tools/cache"
 )
 
@@ -35,7 +36,7 @@ import (
 // ReplicaSets.
 type ReplicaSetInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1beta1.ReplicaSetLister
+	Lister() extensionsv1beta1.ReplicaSetLister
 }
 
 type replicaSetInformer struct {
@@ -61,16 +62,16 @@ func NewFilteredReplicaSetInformer(client kubernetes.Interface, namespace string
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.ExtensionsV1beta1().ReplicaSets(namespace).List(options)
+				return client.ExtensionsV1beta1().ReplicaSets(namespace).List(context.TODO(), options)
 			},
 			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.ExtensionsV1beta1().ReplicaSets(namespace).Watch(options)
+				return client.ExtensionsV1beta1().ReplicaSets(namespace).Watch(context.TODO(), options)
 			},
 		},
-		&extensionsv1beta1.ReplicaSet{},
+		&apiextensionsv1beta1.ReplicaSet{},
 		resyncPeriod,
 		indexers,
 	)
@@ -81,9 +82,9 @@ func (f *replicaSetInformer) defaultInformer(client kubernetes.Interface, resync
 }
 
 func (f *replicaSetInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&extensionsv1beta1.ReplicaSet{}, f.defaultInformer)
+	return f.factory.InformerFor(&apiextensionsv1beta1.ReplicaSet{}, f.defaultInformer)
 }
 
-func (f *replicaSetInformer) Lister() v1beta1.ReplicaSetLister {
-	return v1beta1.NewReplicaSetLister(f.Informer().GetIndexer())
+func (f *replicaSetInformer) Lister() extensionsv1beta1.ReplicaSetLister {
+	return extensionsv1beta1.NewReplicaSetLister(f.Informer().GetIndexer())
 }

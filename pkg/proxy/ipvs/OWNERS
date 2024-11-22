@@ -1,12 +1,18 @@
 # See the OWNERS docs at https://go.k8s.io/owners
 
 reviewers:
-- sig-network-reviewers
-- brendandburns
-- Lion-Wei
+  - sig-network-reviewers
+  - andrewsykim
+  - aroradaman
+  - uablrek
 approvers:
-- sig-network-approvers
-- brendandburns
-- m1093782566
+  - sig-network-approvers
+  - andrewsykim
+  - uablrek
 labels:
-- sig/network
+  - sig/network
+  - area/ipvs
+emeritus_approvers:
+  - brendandburns
+  - lbernail
+  - m1093782566

@@ -1,4 +1,5 @@
-// +build !linux,!windows linux,!cgo
+//go:build !linux && !windows
+// +build !linux,!windows
 
 /*
 Copyright 2015 The Kubernetes Authors.
@@ -19,9 +20,9 @@ limitations under the License.
 package cadvisor
 
 import (
+	"context"
 	"errors"
 
-	"github.com/google/cadvisor/events"
 	cadvisorapi "github.com/google/cadvisor/info/v1"
 	cadvisorapiv2 "github.com/google/cadvisor/info/v2"
 )
@@ -31,50 +32,43 @@ type cadvisorUnsupported struct {
 
 var _ Interface = new(cadvisorUnsupported)
 
-func New(imageFsInfoProvider ImageFsInfoProvider, rootPath string, usingLegacyStats bool) (Interface, error) {
+// New creates a new cAdvisor Interface for unsupported systems.
+func New(imageFsInfoProvider ImageFsInfoProvider, rootPath string, cgroupsRoots []string, usingLegacyStats, localStorageCapacityIsolation bool) (Interface, error) {
 	return &cadvisorUnsupported{}, nil
 }
 
-var unsupportedErr = errors.New("cAdvisor is unsupported in this build")
+var errUnsupported = errors.New("cAdvisor is unsupported in this build")
 
 func (cu *cadvisorUnsupported) Start() error {
-	return unsupportedErr
-}
-
-func (cu *cadvisorUnsupported) DockerContainer(name string, req *cadvisorapi.ContainerInfoRequest) (cadvisorapi.ContainerInfo, error) {
-	return cadvisorapi.ContainerInfo{}, unsupportedErr
-}
-
-func (cu *cadvisorUnsupported) ContainerInfo(name string, req *cadvisorapi.ContainerInfoRequest) (*cadvisorapi.ContainerInfo, error) {
-	return nil, unsupportedErr
+	return errUnsupported
 }
 
 func (cu *cadvisorUnsupported) ContainerInfoV2(name string, options cadvisorapiv2.RequestOptions) (map[string]cadvisorapiv2.ContainerInfo, error) {
-	return nil, unsupportedErr
+	return nil, errUnsupported
 }
 
-func (cu *cadvisorUnsupported) SubcontainerInfo(name string, req *cadvisorapi.ContainerInfoRequest) (map[string]*cadvisorapi.ContainerInfo, error) {
-	return nil, unsupportedErr
+func (cu *cadvisorUnsupported) GetRequestedContainersInfo(containerName string, options cadvisorapiv2.RequestOptions) (map[string]*cadvisorapi.ContainerInfo, error) {
+	return nil, errUnsupported
 }
 
 func (cu *cadvisorUnsupported) MachineInfo() (*cadvisorapi.MachineInfo, error) {
-	return nil, unsupportedErr
+	return nil, errUnsupported
 }
 
 func (cu *cadvisorUnsupported) VersionInfo() (*cadvisorapi.VersionInfo, error) {
-	return nil, unsupportedErr
+	return nil, errUnsupported
 }
 
-func (cu *cadvisorUnsupported) ImagesFsInfo() (cadvisorapiv2.FsInfo, error) {
-	return cadvisorapiv2.FsInfo{}, unsupportedErr
+func (cu *cadvisorUnsupported) ImagesFsInfo(context.Context) (cadvisorapiv2.FsInfo, error) {
+	return cadvisorapiv2.FsInfo{}, errUnsupported
 }
 
 func (cu *cadvisorUnsupported) RootFsInfo() (cadvisorapiv2.FsInfo, error) {
-	return cadvisorapiv2.FsInfo{}, unsupportedErr
+	return cadvisorapiv2.FsInfo{}, errUnsupported
 }
 
-func (cu *cadvisorUnsupported) WatchEvents(request *events.Request) (*events.EventChannel, error) {
-	return nil, unsupportedErr
+func (cu *cadvisorUnsupported) ContainerFsInfo(context.Context) (cadvisorapiv2.FsInfo, error) {
+	return cadvisorapiv2.FsInfo{}, errUnsupported
 }
 
 func (cu *cadvisorUnsupported) GetDirFsInfo(path string) (cadvisorapiv2.FsInfo, error) {

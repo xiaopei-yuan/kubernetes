@@ -18,17 +18,20 @@ package history
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	apps "k8s.io/api/apps/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+	clientscheme "k8s.io/client-go/kubernetes/scheme"
+	core "k8s.io/client-go/testing"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	"k8s.io/kubernetes/pkg/api/testapi"
 	"k8s.io/kubernetes/pkg/controller"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -38,9 +41,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
-
-	core "k8s.io/client-go/testing"
-	"time"
+	"k8s.io/utils/pointer"
 )
 
 func TestRealHistory_ListControllerRevisions(t *testing.T) {
@@ -260,7 +261,7 @@ func TestRealHistory_CreateControllerRevision(t *testing.T) {
 
 		var collisionCount int32
 		for _, item := range test.existing {
-			_, err := client.AppsV1().ControllerRevisions(item.parent.GetNamespace()).Create(item.revision)
+			_, err := client.AppsV1().ControllerRevisions(item.parent.GetNamespace()).Create(context.TODO(), item.revision, metav1.CreateOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -968,12 +969,12 @@ func TestRealHistory_AdoptControllerRevision(t *testing.T) {
 					return true, nil, errors.NewNotFound(apps.Resource("controllerrevisions"), test.revision.Name)
 				}
 				b, err := strategicpatch.StrategicMergePatch(
-					[]byte(runtime.EncodeOrDie(testapi.Apps.Codec(), test.revision)),
+					[]byte(runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(apps.SchemeGroupVersion), test.revision)),
 					action.GetPatch(), test.revision)
 				if err != nil {
 					return true, nil, err
 				}
-				obj, err := runtime.Decode(testapi.Apps.Codec(), b)
+				obj, err := runtime.Decode(clientscheme.Codecs.LegacyCodec(apps.SchemeGroupVersion), b)
 				if err != nil {
 					return true, nil, err
 				}
@@ -1219,12 +1220,12 @@ func TestRealHistory_ReleaseControllerRevision(t *testing.T) {
 						test.revision.GroupVersionKind().GroupKind(), test.revision.Name, nil)
 				}
 				b, err := strategicpatch.StrategicMergePatch(
-					[]byte(runtime.EncodeOrDie(testapi.Apps.Codec(), test.revision)),
+					[]byte(runtime.EncodeOrDie(clientscheme.Codecs.LegacyCodec(apps.SchemeGroupVersion), test.revision)),
 					action.GetPatch(), test.revision)
 				if err != nil {
 					return true, nil, err
 				}
-				obj, err := runtime.Decode(testapi.Apps.Codec(), b)
+				obj, err := runtime.Decode(clientscheme.Codecs.LegacyCodec(apps.SchemeGroupVersion), b)
 				if err != nil {
 					return true, nil, err
 				}
@@ -1649,7 +1650,7 @@ func newStatefulSet(replicas int, name string, uid types.UID, labels map[string]
 				MatchLabels:      nil,
 				MatchExpressions: testMatchExpressions,
 			},
-			Replicas: func() *int32 { i := int32(replicas); return &i }(),
+			Replicas: pointer.Int32(int32(replicas)),
 			Template: v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
@@ -1678,7 +1679,7 @@ func newStatefulSet(replicas int, name string, uid types.UID, labels map[string]
 				{
 					ObjectMeta: metav1.ObjectMeta{Name: "datadir"},
 					Spec: v1.PersistentVolumeClaimSpec{
-						Resources: v1.ResourceRequirements{
+						Resources: v1.VolumeResourceRequirements{
 							Requests: v1.ResourceList{
 								v1.ResourceStorage: *resource.NewQuantity(1, resource.BinarySI),
 							},

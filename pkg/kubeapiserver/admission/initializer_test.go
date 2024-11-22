@@ -17,6 +17,7 @@ limitations under the License.
 package admission
 
 import (
+	"context"
 	"testing"
 
 	"k8s.io/apiserver/pkg/admission"
@@ -24,7 +25,7 @@ import (
 
 type doNothingAdmission struct{}
 
-func (doNothingAdmission) Admit(a admission.Attributes, o admission.ObjectInterfaces) error {
+func (doNothingAdmission) Admit(ctx context.Context, a admission.Attributes, o admission.ObjectInterfaces) error {
 	return nil
 }
 func (doNothingAdmission) Handles(o admission.Operation) bool { return false }
@@ -41,7 +42,7 @@ func (p *WantsCloudConfigAdmissionPlugin) SetCloudConfig(cloudConfig []byte) {
 
 func TestCloudConfigAdmissionPlugin(t *testing.T) {
 	cloudConfig := []byte("cloud-configuration")
-	initializer := NewPluginInitializer(cloudConfig, nil, nil)
+	initializer := NewPluginInitializer(cloudConfig)
 	wantsCloudConfigAdmission := &WantsCloudConfigAdmissionPlugin{}
 	initializer.Initialize(wantsCloudConfigAdmission)
 

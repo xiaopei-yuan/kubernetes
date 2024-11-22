@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 /*
@@ -29,13 +30,13 @@ import (
 	"syscall"
 	"testing"
 
-	"k8s.io/klog"
-
-	"k8s.io/kubernetes/pkg/util/mount"
+	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
 )
 
 func TestSafeMakeDir(t *testing.T) {
 	defaultPerm := os.FileMode(0750) + os.ModeDir
+	maxPerm := os.FileMode(0777) + os.ModeDir
 	tests := []struct {
 		name string
 		// Function that prepares directory structure for the test under given
@@ -54,6 +55,16 @@ func TestSafeMakeDir(t *testing.T) {
 			"test/directory",
 			"test/directory",
 			defaultPerm,
+			false,
+		},
+		{
+			"all-created-subpath-directory-with-permissions",
+			func(base string) error {
+				return nil
+			},
+			"test/directory",
+			"test",
+			maxPerm,
 			false,
 		},
 		{
@@ -248,7 +259,7 @@ func TestSafeMakeDir(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			base, err := ioutil.TempDir("", "safe-make-dir-"+test.name+"-")
 			if err != nil {
-				t.Fatalf(err.Error())
+				t.Fatal(err.Error())
 			}
 			defer os.RemoveAll(base)
 			test.prepare(base)
@@ -374,7 +385,7 @@ func TestRemoveEmptyDirs(t *testing.T) {
 		klog.V(4).Infof("test %q", test.name)
 		base, err := ioutil.TempDir("", "remove-empty-dirs-"+test.name+"-")
 		if err != nil {
-			t.Fatalf(err.Error())
+			t.Fatal(err.Error())
 		}
 		if err = test.prepare(base); err != nil {
 			os.RemoveAll(base)
@@ -409,6 +420,7 @@ func TestCleanSubPaths(t *testing.T) {
 		// Function that validates directory structure after the test
 		validate    func(base string) error
 		expectError bool
+		unmount     func(path string) error
 	}{
 		{
 			name: "not-exists",
@@ -539,13 +551,71 @@ func TestCleanSubPaths(t *testing.T) {
 				return validateDirExists(baseSubdir)
 			},
 		},
+		{
+			name: "subpath-with-files",
+			prepare: func(base string) ([]mount.MountPoint, error) {
+				containerPath := filepath.Join(base, containerSubPathDirectoryName, testVol, "container1")
+				if err := os.MkdirAll(containerPath, defaultPerm); err != nil {
+					return nil, err
+				}
+
+				file0 := filepath.Join(containerPath, "0")
+				if err := ioutil.WriteFile(file0, []byte{}, defaultPerm); err != nil {
+					return nil, err
+				}
+
+				dir1 := filepath.Join(containerPath, "1")
+				if err := os.MkdirAll(filepath.Join(dir1, "my-dir-1"), defaultPerm); err != nil {
+					return nil, err
+				}
+
+				dir2 := filepath.Join(containerPath, "2")
+				if err := os.MkdirAll(filepath.Join(dir2, "my-dir-2"), defaultPerm); err != nil {
+					return nil, err
+				}
+
+				file3 := filepath.Join(containerPath, "3")
+				if err := ioutil.WriteFile(file3, []byte{}, defaultPerm); err != nil {
+					return nil, err
+				}
+
+				mounts := []mount.MountPoint{
+					{Device: "/dev/sdb", Path: file0},
+					{Device: "/dev/sdc", Path: dir1},
+					{Device: "/dev/sdd", Path: dir2},
+					{Device: "/dev/sde", Path: file3},
+				}
+				return mounts, nil
+			},
+			unmount: func(mountpath string) error {
+				err := filepath.Walk(mountpath, func(path string, info os.FileInfo, _ error) error {
+					if path == mountpath {
+						// Skip top level directory
+						return nil
+					}
+
+					if err := os.Remove(path); err != nil {
+						return err
+					}
+					return filepath.SkipDir
+				})
+				if err != nil {
+					return fmt.Errorf("error processing %s: %s", mountpath, err)
+				}
+
+				return nil
+			},
+			validate: func(base string) error {
+				return validateDirNotExists(filepath.Join(base, containerSubPathDirectoryName))
+			},
+		},
 	}
 
 	for _, test := range tests {
 		klog.V(4).Infof("test %q", test.name)
 		base, err := ioutil.TempDir("", "clean-subpaths-"+test.name+"-")
 		if err != nil {
-			t.Fatalf(err.Error())
+			t.Fatal(err.Error())
 		}
 		mounts, err := test.prepare(base)
 		if err != nil {
@@ -553,7 +623,8 @@ func TestCleanSubPaths(t *testing.T) {
 			t.Fatalf("failed to prepare test %q: %v", test.name, err.Error())
 		}
 
-		fm := &mount.FakeMounter{MountPoints: mounts}
+		fm := mount.NewFakeMounter(mounts)
+		fm.UnmountFunc = test.unmount
 
 		err = doCleanSubPaths(fm, base, testVol)
 		if err != nil && !test.expectError {
@@ -582,7 +653,7 @@ func setupFakeMounter(testMounts []string) *mount.FakeMounter {
 	for _, mountPoint := range testMounts {
 		mounts = append(mounts, mount.MountPoint{Device: "/foo", Path: mountPoint})
 	}
-	return &mount.FakeMounter{MountPoints: mounts}
+	return mount.NewFakeMounter(mounts)
 }
 
 func getTestPaths(base string) (string, string) {
@@ -801,7 +872,7 @@ func TestBindSubPath(t *testing.T) {
 		klog.V(4).Infof("test %q", test.name)
 		base, err := ioutil.TempDir("", "bind-subpath-"+test.name+"-")
 		if err != nil {
-			t.Fatalf(err.Error())
+			t.Fatal(err.Error())
 		}
 
 		mounts, volPath, subPath, err := test.prepare(base)
@@ -847,6 +918,143 @@ func TestBindSubPath(t *testing.T) {
 		}
 
 		os.RemoveAll(base)
+	}
+}
+
+func TestSubpath_PrepareSafeSubpath(t *testing.T) {
+	//complete code
+	defaultPerm := os.FileMode(0750)
+
+	tests := []struct {
+		name string
+		// Function that prepares directory structure for the test under given
+		// base.
+		prepare      func(base string) ([]string, string, string, error)
+		expectError  bool
+		expectAction []mount.FakeAction
+		mountExists  bool
+	}{
+		{
+			name: "subpath-mount-already-exists-with-mismatching-mount",
+			prepare: func(base string) ([]string, string, string, error) {
+				volpath, subpathMount := getTestPaths(base)
+				mounts := []string{subpathMount}
+				if err := os.MkdirAll(subpathMount, defaultPerm); err != nil {
+					return nil, "", "", err
+				}
+
+				subpath := filepath.Join(volpath, "dir0")
+				return mounts, volpath, subpath, os.MkdirAll(subpath, defaultPerm)
+			},
+			expectError:  false,
+			expectAction: []mount.FakeAction{{Action: "unmount"}},
+			mountExists:  false,
+		},
+		{
+			name: "subpath-mount-already-exists-with-samefile",
+			prepare: func(base string) ([]string, string, string, error) {
+				volpath, subpathMount := getTestPaths(base)
+				mounts := []string{subpathMount}
+				subpathMountRoot := filepath.Dir(subpathMount)
+
+				if err := os.MkdirAll(subpathMountRoot, defaultPerm); err != nil {
+					return nil, "", "", err
+				}
+				targetFile, err := os.Create(subpathMount)
+				if err != nil {
+					return nil, "", "", err
+				}
+				defer targetFile.Close()
+
+				if err := os.MkdirAll(volpath, defaultPerm); err != nil {
+					return nil, "", "", err
+				}
+				subpath := filepath.Join(volpath, "file0")
+				// using hard link to simulate bind mounts
+				err = os.Link(subpathMount, subpath)
+				if err != nil {
+					return nil, "", "", err
+				}
+				return mounts, volpath, subpath, nil
+			},
+			expectError:  false,
+			expectAction: []mount.FakeAction{},
+			mountExists:  true,
+		},
+	}
+	for _, test := range tests {
+		klog.V(4).Infof("test %q", test.name)
+		base, err := ioutil.TempDir("", "bind-subpath-"+test.name+"-")
+		if err != nil {
+			t.Fatal(err.Error())
+		}
+		defer os.RemoveAll(base)
+
+		mounts, volPath, subPath, err := test.prepare(base)
+		if err != nil {
+			os.RemoveAll(base)
+			t.Fatalf("failed to prepare test %q: %v", test.name, err.Error())
+		}
+
+		fm := setupFakeMounter(mounts)
+
+		subpath := Subpath{
+			VolumeMountIndex: testSubpath,
+			Path:             subPath,
+			VolumeName:       testVol,
+			VolumePath:       volPath,
+			PodDir:           filepath.Join(base, "pod0"),
+			ContainerName:    testContainer,
+		}
+
+		_, subpathMount := getTestPaths(base)
+		bindMountExists, bindPathTarget, err := prepareSubpathTarget(fm, subpath)
+
+		if bindMountExists != test.mountExists {
+			t.Errorf("test %q failed: expected bindMountExists %v, got %v", test.name, test.mountExists, bindMountExists)
+		}
+
+		logActions := fm.GetLog()
+		if len(test.expectAction) == 0 && len(logActions) > 0 {
+			t.Errorf("test %q failed: expected no actions, got %v", test.name, logActions)
+		}
+
+		if len(test.expectAction) > 0 {
+			foundMatchingAction := false
+			testAction := test.expectAction[0]
+			for _, action := range logActions {
+				if action.Action == testAction.Action {
+					foundMatchingAction = true
+					break
+				}
+			}
+			if !foundMatchingAction {
+				t.Errorf("test %q failed: expected action %q, got %v", test.name, testAction.Action, logActions)
+			}
+		}
+
+		if test.expectError {
+			if err == nil {
+				t.Errorf("test %q failed: expected error, got success", test.name)
+			}
+			if bindPathTarget != "" {
+				t.Errorf("test %q failed: expected empty bindPathTarget, got %v", test.name, bindPathTarget)
+			}
+			if err = validateDirNotExists(subpathMount); err != nil {
+				t.Errorf("test %q failed: %v", test.name, err)
+			}
+		}
+		if !test.expectError {
+			if err != nil {
+				t.Errorf("test %q failed: %v", test.name, err)
+			}
+			if bindPathTarget != subpathMount {
+				t.Errorf("test %q failed: expected bindPathTarget %v, got %v", test.name, subpathMount, bindPathTarget)
+			}
+			if err = validateFileExists(subpathMount); err != nil {
+				t.Errorf("test %q failed: %v", test.name, err)
+			}
+		}
 	}
 }
 
@@ -986,7 +1194,7 @@ func TestSafeOpen(t *testing.T) {
 				socketFile, socketError := createSocketFile(base)
 
 				if socketError != nil {
-					return fmt.Errorf("Error preparing socket file %s with %v", socketFile, socketError)
+					return fmt.Errorf("error preparing socket file %s with %w", socketFile, socketError)
 				}
 				return nil
 			},
@@ -999,7 +1207,7 @@ func TestSafeOpen(t *testing.T) {
 				testSocketFile, socketError := createSocketFile(base)
 
 				if socketError != nil {
-					return fmt.Errorf("Error preparing socket file %s with %v", testSocketFile, socketError)
+					return fmt.Errorf("error preparing socket file %s with %w", testSocketFile, socketError)
 				}
 				return nil
 			},
@@ -1012,7 +1220,7 @@ func TestSafeOpen(t *testing.T) {
 		klog.V(4).Infof("test %q", test.name)
 		base, err := ioutil.TempDir("", "safe-open-"+test.name+"-")
 		if err != nil {
-			t.Fatalf(err.Error())
+			t.Fatal(err.Error())
 		}
 
 		test.prepare(base)
@@ -1159,7 +1367,7 @@ func TestFindExistingPrefix(t *testing.T) {
 		klog.V(4).Infof("test %q", test.name)
 		base, err := ioutil.TempDir("", "find-prefix-"+test.name+"-")
 		if err != nil {
-			t.Fatalf(err.Error())
+			t.Fatal(err.Error())
 		}
 		test.prepare(base)
 		path := filepath.Join(base, test.path)
@@ -1192,7 +1400,7 @@ func validateDirEmpty(dir string) error {
 	}
 
 	if len(files) != 0 {
-		return fmt.Errorf("Directory %q is not empty", dir)
+		return fmt.Errorf("directory %q is not empty", dir)
 	}
 	return nil
 }

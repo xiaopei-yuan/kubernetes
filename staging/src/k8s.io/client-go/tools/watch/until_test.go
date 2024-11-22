@@ -19,6 +19,7 @@ package watch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -35,7 +36,6 @@ import (
 )
 
 type fakePod struct {
-	name string
 }
 
 func (obj *fakePod) GetObjectKind() schema.ObjectKind { return schema.EmptyObjectKind }
@@ -209,7 +209,7 @@ func TestUntilWithSync(t *testing.T) {
 			conditionFunc: func(e watch.Event) (bool, error) {
 				return true, nil
 			},
-			expectedErr:   errors.New("timed out waiting for the condition"),
+			expectedErr:   wait.ErrWaitTimeout,
 			expectedEvent: nil,
 		},
 		{
@@ -228,7 +228,7 @@ func TestUntilWithSync(t *testing.T) {
 			conditionFunc: func(e watch.Event) (bool, error) {
 				return true, nil
 			},
-			expectedErr:   errors.New("UntilWithSync: unable to sync caches: context deadline exceeded"),
+			expectedErr:   fmt.Errorf("UntilWithSync: unable to sync caches: %w", context.DeadlineExceeded),
 			expectedEvent: nil,
 		},
 		{
@@ -238,10 +238,10 @@ func TestUntilWithSync(t *testing.T) {
 
 				return &cache.ListWatch{
 					ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-						return fakeclient.CoreV1().Secrets("").List(options)
+						return fakeclient.CoreV1().Secrets("").List(context.TODO(), options)
 					},
 					WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-						return fakeclient.CoreV1().Secrets("").Watch(options)
+						return fakeclient.CoreV1().Secrets("").Watch(context.TODO(), options)
 					},
 				}
 			}(),
@@ -268,10 +268,10 @@ func TestUntilWithSync(t *testing.T) {
 
 				return &cache.ListWatch{
 					ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-						return fakeclient.CoreV1().Secrets("").List(options)
+						return fakeclient.CoreV1().Secrets("").List(context.TODO(), options)
 					},
 					WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-						return fakeclient.CoreV1().Secrets("").Watch(options)
+						return fakeclient.CoreV1().Secrets("").Watch(context.TODO(), options)
 					},
 				}
 			}(),

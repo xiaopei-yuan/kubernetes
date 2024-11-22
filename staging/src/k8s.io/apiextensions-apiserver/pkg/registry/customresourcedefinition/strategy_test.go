@@ -17,456 +17,1304 @@ limitations under the License.
 package customresourcedefinition
 
 import (
-	"fmt"
-	"reflect"
+	"context"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
+	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/validation"
 	apiextensionsfeatures "k8s.io/apiextensions-apiserver/pkg/features"
-	"k8s.io/apimachinery/pkg/util/diff"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/util/version"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
-func TestDropDisableFieldsCustomResourceDefinition(t *testing.T) {
-	t.Log("testing unversioned validation..")
-	for _, validationEnabled := range []bool{true, false} {
-		crdWithUnversionedValidation := func() *apiextensions.CustomResourceDefinition {
-			// crd with non-versioned validation
-			return &apiextensions.CustomResourceDefinition{
+func strPtr(in string) *string {
+	return &in
+}
+
+func TestValidateAPIApproval(t *testing.T) {
+	okFn := func(t *testing.T, errors field.ErrorList) {
+		t.Helper()
+		if len(errors) > 0 {
+			t.Fatal(errors)
+		}
+	}
+
+	tests := []struct {
+		name string
+
+		group              string
+		annotationValue    string
+		oldAnnotationValue *string
+		validateError      func(t *testing.T, errors field.ErrorList)
+	}{
+		{
+			name:            "ignore non-k8s group",
+			group:           "other.io",
+			annotationValue: "invalid",
+			validateError:   okFn,
+		},
+		{
+			name:            "invalid annotation create",
+			group:           "sigs.k8s.io",
+			annotationValue: "invalid",
+			validateError: func(t *testing.T, errors field.ErrorList) {
+				t.Helper()
+				if len(errors) == 0 {
+					t.Fatal("expected errors, got none")
+				}
+				if e, a := `metadata.annotations[api-approved.kubernetes.io]: Invalid value: "invalid": protected groups must have approval annotation "api-approved.kubernetes.io" with either a URL or a reason starting with "unapproved", see https://github.com/kubernetes/enhancements/pull/1111`, errors.ToAggregate().Error(); e != a {
+					t.Fatal(errors)
+				}
+			},
+		},
+		{
+			name:               "invalid annotation update",
+			group:              "sigs.k8s.io",
+			annotationValue:    "invalid",
+			oldAnnotationValue: strPtr("invalid"),
+			validateError:      okFn,
+		},
+		{
+			name:               "invalid annotation to missing",
+			group:              "sigs.k8s.io",
+			annotationValue:    "",
+			oldAnnotationValue: strPtr("invalid"),
+			validateError: func(t *testing.T, errors field.ErrorList) {
+				t.Helper()
+				if len(errors) == 0 {
+					t.Fatal("expected errors, got none")
+				}
+				if e, a := `metadata.annotations[api-approved.kubernetes.io]: Required value: protected groups must have approval annotation "api-approved.kubernetes.io", see https://github.com/kubernetes/enhancements/pull/1111`, errors.ToAggregate().Error(); e != a {
+					t.Fatal(errors)
+				}
+			},
+		},
+		{
+			name:               "missing to invalid annotation",
+			group:              "sigs.k8s.io",
+			annotationValue:    "invalid",
+			oldAnnotationValue: strPtr(""),
+			validateError: func(t *testing.T, errors field.ErrorList) {
+				t.Helper()
+				if len(errors) == 0 {
+					t.Fatal("expected errors, got none")
+				}
+				if e, a := `metadata.annotations[api-approved.kubernetes.io]: Invalid value: "invalid": protected groups must have approval annotation "api-approved.kubernetes.io" with either a URL or a reason starting with "unapproved", see https://github.com/kubernetes/enhancements/pull/1111`, errors.ToAggregate().Error(); e != a {
+					t.Fatal(errors)
+				}
+			},
+		},
+		{
+			name:            "missing annotation",
+			group:           "sigs.k8s.io",
+			annotationValue: "",
+			validateError: func(t *testing.T, errors field.ErrorList) {
+				t.Helper()
+				if len(errors) == 0 {
+					t.Fatal("expected errors, got none")
+				}
+				if e, a := `metadata.annotations[api-approved.kubernetes.io]: Required value: protected groups must have approval annotation "api-approved.kubernetes.io", see https://github.com/kubernetes/enhancements/pull/1111`, errors.ToAggregate().Error(); e != a {
+					t.Fatal(errors)
+				}
+			},
+		},
+		{
+			name:               "missing annotation update",
+			group:              "sigs.k8s.io",
+			annotationValue:    "",
+			oldAnnotationValue: strPtr(""),
+			validateError:      okFn,
+		},
+		{
+			name:            "url",
+			group:           "sigs.k8s.io",
+			annotationValue: "https://github.com/kubernetes/kubernetes/pull/79724",
+			validateError:   okFn,
+		},
+		{
+			name:            "unapproved",
+			group:           "sigs.k8s.io",
+			annotationValue: "unapproved, other reason",
+			validateError:   okFn,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			crd := &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos." + test.group, Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: test.annotationValue}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Group:    test.group,
+					Scope:    apiextensions.NamespaceScoped,
+					Version:  "v1",
+					Versions: []apiextensions.CustomResourceDefinitionVersion{{Name: "v1", Storage: true, Served: true}},
+					Names:    apiextensions.CustomResourceDefinitionNames{Plural: "foos", Singular: "foo", Kind: "Foo", ListKind: "FooList"},
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{Type: "object", XPreserveUnknownFields: pointer.BoolPtr(true)},
+					},
+				},
+				Status: apiextensions.CustomResourceDefinitionStatus{
+					StoredVersions: []string{"v1"},
+				},
+			}
+			var oldCRD *apiextensions.CustomResourceDefinition
+			if test.oldAnnotationValue != nil {
+				oldCRD = &apiextensions.CustomResourceDefinition{
+					ObjectMeta: metav1.ObjectMeta{Name: "foos." + test.group, Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: *test.oldAnnotationValue}, ResourceVersion: "1"},
+					Spec: apiextensions.CustomResourceDefinitionSpec{
+						Group:    test.group,
+						Scope:    apiextensions.NamespaceScoped,
+						Version:  "v1",
+						Versions: []apiextensions.CustomResourceDefinitionVersion{{Name: "v1", Storage: true, Served: true}},
+						Names:    apiextensions.CustomResourceDefinitionNames{Plural: "foos", Singular: "foo", Kind: "Foo", ListKind: "FooList"},
+						Validation: &apiextensions.CustomResourceValidation{
+							OpenAPIV3Schema: &apiextensions.JSONSchemaProps{Type: "object", XPreserveUnknownFields: pointer.BoolPtr(true)},
+						},
+					},
+					Status: apiextensions.CustomResourceDefinitionStatus{
+						StoredVersions: []string{"v1"},
+					},
+				}
+			}
+
+			var actual field.ErrorList
+			ctx := context.TODO()
+			if oldCRD == nil {
+				actual = validation.ValidateCustomResourceDefinition(ctx, crd)
+			} else {
+				actual = validation.ValidateCustomResourceDefinitionUpdate(ctx, crd, oldCRD)
+			}
+			test.validateError(t, actual)
+		})
+	}
+}
+
+// TestDropDisabledFields tests if the drop functionality is working fine or not with feature gate switch
+func TestDropDisabledFields(t *testing.T) {
+	testCases := []struct {
+		name                   string
+		enableRatcheting       bool
+		enableSelectableFields bool
+		crd                    *apiextensions.CustomResourceDefinition
+		oldCRD                 *apiextensions.CustomResourceDefinition
+		expectedCRD            *apiextensions.CustomResourceDefinition
+	}{
+		{
+			name:             "Ratcheting, For creation, FG disabled, no OptionalOldSelf, no field drop",
+			enableRatcheting: false,
+			crd:              &apiextensions.CustomResourceDefinition{},
+			oldCRD:           nil,
+			expectedCRD:      &apiextensions.CustomResourceDefinition{},
+		},
+		{
+			name:             "Ratcheting, For creation, FG disabled, set OptionalOldSelf, drop OptionalOldSelf",
+			enableRatcheting: false,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
 				Spec: apiextensions.CustomResourceDefinitionSpec{
 					Validation: &apiextensions.CustomResourceValidation{
-						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{},
-					},
-				},
-			}
-		}
-		crdWithoutUnversionedValidation := func() *apiextensions.CustomResourceDefinition {
-			// crd with non-versioned validation
-			return &apiextensions.CustomResourceDefinition{
-				Spec: apiextensions.CustomResourceDefinitionSpec{},
-			}
-		}
-		crdInfos := []struct {
-			name            string
-			hasCRValidation bool
-			crd             func() *apiextensions.CustomResourceDefinition
-		}{
-			{
-				name:            "has unversioned validation",
-				hasCRValidation: true,
-				crd:             crdWithUnversionedValidation,
-			},
-			{
-				name:            "doesn't have unversioned validation",
-				hasCRValidation: false,
-				crd:             crdWithoutUnversionedValidation,
-			},
-			{
-				name:            "nil",
-				hasCRValidation: false,
-				crd:             func() *apiextensions.CustomResourceDefinition { return nil },
-			},
-		}
-		for _, oldCRDInfo := range crdInfos {
-			for _, newCRDInfo := range crdInfos {
-				oldCRDHasValidation, oldCRD := oldCRDInfo.hasCRValidation, oldCRDInfo.crd()
-				newCRDHasValidation, newCRD := newCRDInfo.hasCRValidation, newCRDInfo.crd()
-				if newCRD == nil {
-					continue
-				}
-				t.Run(fmt.Sprintf("validation feature enabled=%v, old CRD %v, new CRD %v", validationEnabled, oldCRDInfo.name, newCRDInfo.name),
-					func(t *testing.T) {
-						defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceValidation, validationEnabled)()
-						var oldCRDSpec *apiextensions.CustomResourceDefinitionSpec
-						if oldCRD != nil {
-							oldCRDSpec = &oldCRD.Spec
-						}
-						dropDisabledFields(&newCRD.Spec, oldCRDSpec)
-						// old CRD should never be changed
-						if !reflect.DeepEqual(oldCRD, oldCRDInfo.crd()) {
-							t.Errorf("old crd changed: %v", diff.ObjectReflectDiff(oldCRD, oldCRDInfo.crd()))
-						}
-						switch {
-						case validationEnabled || oldCRDHasValidation:
-							if !reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-								t.Errorf("new crd changed: %v", diff.ObjectReflectDiff(newCRD, newCRDInfo.crd()))
-							}
-						case newCRDHasValidation:
-							if reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-								t.Errorf("new crd was not changed")
-							}
-							if !reflect.DeepEqual(newCRD, crdWithoutUnversionedValidation()) {
-								t.Errorf("new crd had unversioned validation: %v", diff.ObjectReflectDiff(newCRD, crdWithoutUnversionedValidation()))
-							}
-						default:
-							if !reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-								t.Errorf("new crd changed: %v", diff.ObjectReflectDiff(newCRD, newCRDInfo.crd()))
-							}
-						}
-					},
-				)
-			}
-		}
-	}
-
-	t.Log("testing unversioned subresources...")
-	for _, validationEnabled := range []bool{true, false} {
-		crdWithUnversionedSubresources := func() *apiextensions.CustomResourceDefinition {
-			// crd with unversioned subresources
-			return &apiextensions.CustomResourceDefinition{
-				Spec: apiextensions.CustomResourceDefinitionSpec{
-					Subresources: &apiextensions.CustomResourceSubresources{},
-				},
-			}
-		}
-		crdWithoutUnversionedSubresources := func() *apiextensions.CustomResourceDefinition {
-			// crd without unversioned subresources
-			return &apiextensions.CustomResourceDefinition{
-				Spec: apiextensions.CustomResourceDefinitionSpec{},
-			}
-		}
-		crdInfos := []struct {
-			name              string
-			hasCRSubresources bool
-			crd               func() *apiextensions.CustomResourceDefinition
-		}{
-			{
-				name:              "has unversioned subresources",
-				hasCRSubresources: true,
-				crd:               crdWithUnversionedSubresources,
-			},
-			{
-				name:              "doesn't have unversioned subresources",
-				hasCRSubresources: false,
-				crd:               crdWithoutUnversionedSubresources,
-			},
-			{
-				name:              "nil",
-				hasCRSubresources: false,
-				crd:               func() *apiextensions.CustomResourceDefinition { return nil },
-			},
-		}
-		for _, oldCRDInfo := range crdInfos {
-			for _, newCRDInfo := range crdInfos {
-				oldCRDHasSubresources, oldCRD := oldCRDInfo.hasCRSubresources, oldCRDInfo.crd()
-				newCRDHasSubresources, newCRD := newCRDInfo.hasCRSubresources, newCRDInfo.crd()
-				if newCRD == nil {
-					continue
-				}
-				t.Run(fmt.Sprintf("subresources feature enabled=%v, old CRD %v, new CRD %v", validationEnabled, oldCRDInfo.name, newCRDInfo.name),
-					func(t *testing.T) {
-						defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceSubresources, validationEnabled)()
-						defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceWebhookConversion, true)()
-						var oldCRDSpec *apiextensions.CustomResourceDefinitionSpec
-						if oldCRD != nil {
-							oldCRDSpec = &oldCRD.Spec
-						}
-						dropDisabledFields(&newCRD.Spec, oldCRDSpec)
-						// old CRD should never be changed
-						if !reflect.DeepEqual(oldCRD, oldCRDInfo.crd()) {
-							t.Errorf("old crd changed: %v", diff.ObjectReflectDiff(oldCRD, oldCRDInfo.crd()))
-						}
-						switch {
-						case validationEnabled || oldCRDHasSubresources:
-							if !reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-								t.Errorf("new crd changed: %v", diff.ObjectReflectDiff(newCRD, newCRDInfo.crd()))
-							}
-						case newCRDHasSubresources:
-							if reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-								t.Errorf("new crd was not changed")
-							}
-							if !reflect.DeepEqual(newCRD, crdWithoutUnversionedSubresources()) {
-								t.Errorf("new crd had unversioned subresources: %v", diff.ObjectReflectDiff(newCRD, crdWithoutUnversionedSubresources()))
-							}
-						default:
-							if !reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-								t.Errorf("new crd changed: %v", diff.ObjectReflectDiff(newCRD, newCRDInfo.crd()))
-							}
-						}
-					},
-				)
-			}
-		}
-	}
-
-	t.Log("testing versioned validation..")
-	for _, conversionEnabled := range []bool{true, false} {
-		for _, validationEnabled := range []bool{true, false} {
-			crdWithVersionedValidation := func() *apiextensions.CustomResourceDefinition {
-				// crd with versioned validation
-				return &apiextensions.CustomResourceDefinition{
-					Spec: apiextensions.CustomResourceDefinitionSpec{
-						Versions: []apiextensions.CustomResourceDefinitionVersion{
-							{
-								Name: "v1",
-								Schema: &apiextensions.CustomResourceValidation{
-									OpenAPIV3Schema: &apiextensions.JSONSchemaProps{},
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "size(self) > 0",
+									Message:         "openAPIV3Schema should contain more than 0 element.",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"subRule": {
+									Type: "object",
+									XValidations: apiextensions.ValidationRules{
+										{
+											Rule:            "isTest == true",
+											Message:         "isTest should be true.",
+											OptionalOldSelf: ptr.To(true),
+										},
+									},
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"isTest": {
+											Type: "boolean",
+										},
+									},
 								},
 							},
 						},
 					},
-				}
-			}
-			crdWithoutVersionedValidation := func() *apiextensions.CustomResourceDefinition {
-				// crd with versioned validation
-				return &apiextensions.CustomResourceDefinition{
-					Spec: apiextensions.CustomResourceDefinitionSpec{
-						Versions: []apiextensions.CustomResourceDefinitionVersion{
-							{
-								Name: "v1",
-							},
-						},
-					},
-				}
-			}
-			crdInfos := []struct {
-				name            string
-				hasCRValidation bool
-				crd             func() *apiextensions.CustomResourceDefinition
-			}{
-				{
-					name:            "has versioned validation",
-					hasCRValidation: true,
-					crd:             crdWithVersionedValidation,
 				},
-				{
-					name:            "doesn't have versioned validation",
-					hasCRValidation: false,
-					crd:             crdWithoutVersionedValidation,
-				},
-				{
-					name:            "nil",
-					hasCRValidation: false,
-					crd:             func() *apiextensions.CustomResourceDefinition { return nil },
-				},
-			}
-			for _, oldCRDInfo := range crdInfos {
-				for _, newCRDInfo := range crdInfos {
-					oldCRDHasValidation, oldCRD := oldCRDInfo.hasCRValidation, oldCRDInfo.crd()
-					newCRDHasValidation, newCRD := newCRDInfo.hasCRValidation, newCRDInfo.crd()
-					if newCRD == nil {
-						continue
-					}
-					t.Run(fmt.Sprintf("validation feature enabled=%v, old CRD %v, new CRD %v", validationEnabled, oldCRDInfo.name, newCRDInfo.name),
-						func(t *testing.T) {
-							defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceValidation, validationEnabled)()
-							defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceWebhookConversion, conversionEnabled)()
-							var oldCRDSpec *apiextensions.CustomResourceDefinitionSpec
-							if oldCRD != nil {
-								oldCRDSpec = &oldCRD.Spec
-							}
-							dropDisabledFields(&newCRD.Spec, oldCRDSpec)
-							// old CRD should never be changed
-							if !reflect.DeepEqual(oldCRD, oldCRDInfo.crd()) {
-								t.Errorf("old crd changed: %v", diff.ObjectReflectDiff(oldCRD, oldCRDInfo.crd()))
-							}
-							switch {
-							case (conversionEnabled && validationEnabled) || oldCRDHasValidation:
-								if !reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-									t.Errorf("new crd changed: %v", diff.ObjectReflectDiff(newCRD, newCRDInfo.crd()))
-								}
-							case !conversionEnabled && !oldCRDHasValidation:
-								if !reflect.DeepEqual(newCRD, crdWithoutVersionedValidation()) {
-									t.Errorf("new crd was not changed")
-								}
-							case newCRDHasValidation:
-								if reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-									t.Errorf("new crd was not changed")
-								}
-								if !reflect.DeepEqual(newCRD, crdWithoutVersionedValidation()) {
-									t.Errorf("new crd had unversioned validation: %v", diff.ObjectReflectDiff(newCRD, crdWithoutVersionedValidation()))
-								}
-							default:
-								if !reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-									t.Errorf("new crd changed: %v", diff.ObjectReflectDiff(newCRD, newCRDInfo.crd()))
-								}
-							}
-						},
-					)
-				}
-			}
-		}
-	}
-
-	t.Log("testing versioned subresources w/ conversion enabled..")
-	for _, conversionEnabled := range []bool{true, false} {
-		for _, validationEnabled := range []bool{true, false} {
-			crdWithVersionedSubresources := func() *apiextensions.CustomResourceDefinition {
-				// crd with versioned subresources
-				return &apiextensions.CustomResourceDefinition{
-					Spec: apiextensions.CustomResourceDefinitionSpec{
-						Versions: []apiextensions.CustomResourceDefinitionVersion{
-							{
-								Name:         "v1",
-								Subresources: &apiextensions.CustomResourceSubresources{},
-							},
-						},
-					},
-				}
-			}
-			crdWithoutVersionedSubresources := func() *apiextensions.CustomResourceDefinition {
-				// crd without versioned subresources
-				return &apiextensions.CustomResourceDefinition{
-					Spec: apiextensions.CustomResourceDefinitionSpec{
-						Versions: []apiextensions.CustomResourceDefinitionVersion{
-							{
-								Name: "v1",
-							},
-						},
-					},
-				}
-			}
-			crdInfos := []struct {
-				name              string
-				hasCRSubresources bool
-				crd               func() *apiextensions.CustomResourceDefinition
-			}{
-				{
-					name:              "has versioned subresources",
-					hasCRSubresources: true,
-					crd:               crdWithVersionedSubresources,
-				},
-				{
-					name:              "doesn't have versioned subresources",
-					hasCRSubresources: false,
-					crd:               crdWithoutVersionedSubresources,
-				},
-				{
-					name:              "nil",
-					hasCRSubresources: false,
-					crd:               func() *apiextensions.CustomResourceDefinition { return nil },
-				},
-			}
-			for _, oldCRDInfo := range crdInfos {
-				for _, newCRDInfo := range crdInfos {
-					oldCRDHasSubresources, oldCRD := oldCRDInfo.hasCRSubresources, oldCRDInfo.crd()
-					newCRDHasSubresources, newCRD := newCRDInfo.hasCRSubresources, newCRDInfo.crd()
-					if newCRD == nil {
-						continue
-					}
-					t.Run(fmt.Sprintf("subresources feature enabled=%v, old CRD %v, new CRD %v", validationEnabled, oldCRDInfo.name, newCRDInfo.name),
-						func(t *testing.T) {
-							defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceSubresources, validationEnabled)()
-							defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceWebhookConversion, conversionEnabled)()
-							var oldCRDSpec *apiextensions.CustomResourceDefinitionSpec
-							if oldCRD != nil {
-								oldCRDSpec = &oldCRD.Spec
-							}
-							dropDisabledFields(&newCRD.Spec, oldCRDSpec)
-							// old CRD should never be changed
-							if !reflect.DeepEqual(oldCRD, oldCRDInfo.crd()) {
-								t.Errorf("old crd changed: %v", diff.ObjectReflectDiff(oldCRD, oldCRDInfo.crd()))
-							}
-							switch {
-							case (conversionEnabled && validationEnabled) || oldCRDHasSubresources:
-								if !reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-									t.Errorf("new crd changed: %v", diff.ObjectReflectDiff(newCRD, newCRDInfo.crd()))
-								}
-							case !conversionEnabled && !oldCRDHasSubresources:
-								if !reflect.DeepEqual(newCRD, crdWithoutVersionedSubresources()) {
-									t.Errorf("new crd was not changed")
-								}
-							case newCRDHasSubresources:
-								if reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-									t.Errorf("new crd was not changed")
-								}
-								if !reflect.DeepEqual(newCRD, crdWithoutVersionedSubresources()) {
-									t.Errorf("new crd had versioned subresources: %v", diff.ObjectReflectDiff(newCRD, crdWithoutVersionedSubresources()))
-								}
-							default:
-								if !reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-									t.Errorf("new crd changed: %v", diff.ObjectReflectDiff(newCRD, newCRDInfo.crd()))
-								}
-							}
-						},
-					)
-				}
-			}
-		}
-	}
-
-	t.Log("testing conversion webhook..")
-	for _, validationEnabled := range []bool{true, false} {
-		crdWithUnversionedConversionWebhook := func() *apiextensions.CustomResourceDefinition {
-			// crd with conversion webhook
-			return &apiextensions.CustomResourceDefinition{
+			},
+			oldCRD: nil,
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
 				Spec: apiextensions.CustomResourceDefinitionSpec{
-					Conversion: &apiextensions.CustomResourceConversion{
-						WebhookClientConfig: &apiextensions.WebhookClientConfig{},
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:    "size(self) > 0",
+									Message: "openAPIV3Schema should contain more than 0 element.",
+								},
+							},
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"subRule": {
+									Type: "object",
+									XValidations: apiextensions.ValidationRules{
+										{
+											Rule:    "isTest == true",
+											Message: "isTest should be true.",
+										},
+									},
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"isTest": {
+											Type: "boolean",
+										},
+									},
+								},
+							},
+						},
 					},
 				},
-			}
-		}
-		crdWithoutUnversionedConversionWebhook := func() *apiextensions.CustomResourceDefinition {
-			// crd with conversion webhook
-			return &apiextensions.CustomResourceDefinition{
+			},
+		},
+		{
+			name:             "Ratcheting, For creation, FG enabled, set OptionalOldSelf, update with OptionalOldSelf",
+			enableRatcheting: true,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
 				Spec: apiextensions.CustomResourceDefinitionSpec{
-					Conversion: &apiextensions.CustomResourceConversion{},
-				},
-			}
-		}
-		crdInfos := []struct {
-			name                   string
-			hasCRConversionWebhook bool
-			crd                    func() *apiextensions.CustomResourceDefinition
-		}{
-			{
-				name:                   "has conversion webhook",
-				hasCRConversionWebhook: true,
-				crd:                    crdWithUnversionedConversionWebhook,
-			},
-			{
-				name:                   "doesn't have conversion webhook",
-				hasCRConversionWebhook: false,
-				crd:                    crdWithoutUnversionedConversionWebhook,
-			},
-			{
-				name:                   "nil",
-				hasCRConversionWebhook: false,
-				crd:                    func() *apiextensions.CustomResourceDefinition { return nil },
-			},
-		}
-		for _, oldCRDInfo := range crdInfos {
-			for _, newCRDInfo := range crdInfos {
-				oldCRDHasConversionWebhook, oldCRD := oldCRDInfo.hasCRConversionWebhook, oldCRDInfo.crd()
-				newCRDHasConversionWebhook, newCRD := newCRDInfo.hasCRConversionWebhook, newCRDInfo.crd()
-				if newCRD == nil {
-					continue
-				}
-				t.Run(fmt.Sprintf("subresources feature enabled=%v, old CRD %v, new CRD %v", validationEnabled, oldCRDInfo.name, newCRDInfo.name),
-					func(t *testing.T) {
-						defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceWebhookConversion, validationEnabled)()
-						var oldCRDSpec *apiextensions.CustomResourceDefinitionSpec
-						if oldCRD != nil {
-							oldCRDSpec = &oldCRD.Spec
-						}
-						dropDisabledFields(&newCRD.Spec, oldCRDSpec)
-						// old CRD should never be changed
-						if !reflect.DeepEqual(oldCRD, oldCRDInfo.crd()) {
-							t.Errorf("old crd changed: %v", diff.ObjectReflectDiff(oldCRD, oldCRDInfo.crd()))
-						}
-						switch {
-						case validationEnabled || oldCRDHasConversionWebhook:
-							if !reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-								t.Errorf("new crd changed: %v", diff.ObjectReflectDiff(newCRD, newCRDInfo.crd()))
-							}
-						case newCRDHasConversionWebhook:
-							if reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-								t.Errorf("new crd was not changed")
-							}
-							if !reflect.DeepEqual(newCRD, crdWithoutUnversionedConversionWebhook()) {
-								t.Errorf("new crd had webhook conversion: %v", diff.ObjectReflectDiff(newCRD, crdWithoutUnversionedConversionWebhook()))
-							}
-						default:
-							if !reflect.DeepEqual(newCRD, newCRDInfo.crd()) {
-								t.Errorf("new crd changed: %v", diff.ObjectReflectDiff(newCRD, newCRDInfo.crd()))
-							}
-						}
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "size(self) > 0",
+									Message:         "openAPIV3Schema should contain more than 0 element.",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"subRule": {
+									Type: "object",
+									XValidations: apiextensions.ValidationRules{
+										{
+											Rule:            "isTest == true",
+											Message:         "isTest should be true.",
+											OptionalOldSelf: ptr.To(true),
+										},
+									},
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"isTest": {
+											Type: "boolean",
+										},
+									},
+								},
+							},
+						},
 					},
-				)
-			}
-		}
+				},
+			},
+			oldCRD: nil,
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "size(self) > 0",
+									Message:         "openAPIV3Schema should contain more than 0 element.",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"subRule": {
+									Type: "object",
+									XValidations: apiextensions.ValidationRules{
+										{
+											Rule:            "isTest == true",
+											Message:         "isTest should be true.",
+											OptionalOldSelf: ptr.To(true),
+										},
+									},
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"isTest": {
+											Type: "boolean",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:             "Ratcheting, For update, FG disabled, oldCRD OptionalOldSelf in use, don't drop OptionalOldSelfs",
+			enableRatcheting: false,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "size(self) > 0",
+									Message:         "openAPIV3Schema should contain more than 0 element.",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"subRule": {
+									Type: "object",
+									XValidations: apiextensions.ValidationRules{
+										{
+											Rule:            "isTest == true",
+											Message:         "isTest should be true.",
+											OptionalOldSelf: ptr.To(true),
+										},
+									},
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"isTest": {
+											Type: "boolean",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			oldCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"otherRule": {
+									Type: "object",
+									XValidations: apiextensions.ValidationRules{
+										{
+											Rule:            "self.isTest == true",
+											Message:         "isTest should be true.",
+											OptionalOldSelf: ptr.To(true),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "size(self) > 0",
+									Message:         "openAPIV3Schema should contain more than 0 element.",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"subRule": {
+									Type: "object",
+									XValidations: apiextensions.ValidationRules{
+										{
+											Rule:            "isTest == true",
+											Message:         "isTest should be true.",
+											OptionalOldSelf: ptr.To(true),
+										},
+									},
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"isTest": {
+											Type: "boolean",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:             "Ratcheting, For update, FG disabled, oldCRD OptionalOldSelf in use, but different from new, don't drop OptionalOldSelfs",
+			enableRatcheting: false,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "size(self) > 0",
+									Message:         "openAPIV3Schema should contain more than 0 element.",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"subRule": {
+									Type: "object",
+									XValidations: apiextensions.ValidationRules{
+										{
+											Rule:            "isTest == true",
+											Message:         "isTest should be true.",
+											OptionalOldSelf: ptr.To(true),
+										},
+									},
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"isTest": {
+											Type: "boolean",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			oldCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"subRule": {
+									Type: "object",
+									XValidations: apiextensions.ValidationRules{
+										{
+											Rule:            "isTest == true",
+											Message:         "isTest should be true.",
+											OptionalOldSelf: ptr.To(true),
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "size(self) > 0",
+									Message:         "openAPIV3Schema should contain more than 0 element.",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"subRule": {
+									Type: "object",
+									XValidations: apiextensions.ValidationRules{
+										{
+											Rule:            "isTest == true",
+											Message:         "isTest should be true.",
+											OptionalOldSelf: ptr.To(true),
+										},
+									},
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"isTest": {
+											Type: "boolean",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:             "Ratcheting, For update, FG disabled, oldCRD has no OptionalOldSelf, drop OptionalOldSelf",
+			enableRatcheting: false,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "size(self) > 0",
+									Message:         "openAPIV3Schema should contain more than 0 element.",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+						},
+					},
+				},
+			},
+			oldCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:    "size(self) > 0",
+									Message: "openAPIV3Schema should contain more than 0 element.",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:             "Ratcheting, For update, FG enabled, oldCRD has optionalOldSelf, updated to newCRD",
+			enableRatcheting: true,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "size(self) > 0",
+									Message:         "openAPIV3Schema should contain more than 0 element.",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+						},
+					},
+				},
+			},
+			oldCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "old data",
+									Message:         "old data",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "size(self) > 0",
+									Message:         "openAPIV3Schema should contain more than 0 element.",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:             "Ratcheting, For update, FG enabled, oldCRD has no OptionalOldSelf, updated to newCRD",
+			enableRatcheting: true,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "size(self) > 0",
+									Message:         "openAPIV3Schema should contain more than 0 element.",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+						},
+					},
+				},
+			},
+			oldCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							XValidations: apiextensions.ValidationRules{
+								{
+									Rule:            "size(self) > 0",
+									Message:         "openAPIV3Schema should contain more than 0 element.",
+									OptionalOldSelf: ptr.To(true),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		// SelectableFields
+		{
+			name:                   "SelectableFields, For create, FG disabled, SelectableFields in update, dropped",
+			enableSelectableFields: false,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field",
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field": {
+									Type: "string",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                   "SelectableFields, For create, FG enabled, no SelectableFields in update, no drop",
+			enableSelectableFields: true,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field": {
+									Type: "string",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field": {
+									Type: "string",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                   "SelectableFields, For create, FG enabled, SelectableFields in update, no drop",
+			enableSelectableFields: true,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field",
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field",
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                   "SelectableFields, For update, FG disabled, oldCRD has SelectableFields, SelectableFields in update, no drop",
+			enableSelectableFields: false,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+								"field2": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field1",
+						},
+						{
+							JSONPath: ".field2",
+						},
+					},
+				},
+			},
+			oldCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field1",
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+								"field2": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field1",
+						},
+						{
+							JSONPath: ".field2",
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                   "SelectableFields, For update, FG disabled, oldCRD does not have SelectableFields, no SelectableFields in update, no drop",
+			enableSelectableFields: false,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+								"field2": {
+									Type: "string",
+								},
+							},
+						},
+					},
+				},
+			},
+			oldCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+								"field2": {
+									Type: "string",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                   "SelectableFields, For update, FG disabled, oldCRD does not have SelectableFields, SelectableFields in update, dropped",
+			enableSelectableFields: false,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+								"field2": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field1",
+						},
+						{
+							JSONPath: ".field2",
+						},
+					},
+				},
+			},
+			oldCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+								"field2": {
+									Type: "string",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                   "SelectableFields, For update, FG enabled, oldCRD has SelectableFields, SelectableFields in update, no drop",
+			enableSelectableFields: true,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+								"field2": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field1",
+						},
+						{
+							JSONPath: ".field2",
+						},
+					},
+				},
+			},
+			oldCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field1",
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+								"field2": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field1",
+						},
+						{
+							JSONPath: ".field2",
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                   "SelectableFields, For update, FG enabled, oldCRD does not have SelectableFields, SelectableFields in update, no drop",
+			enableSelectableFields: true,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+								"field2": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field1",
+						},
+						{
+							JSONPath: ".field2",
+						},
+					},
+				},
+			},
+			oldCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field1",
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Validation: &apiextensions.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]apiextensions.JSONSchemaProps{
+								"field1": {
+									Type: "string",
+								},
+								"field2": {
+									Type: "string",
+								},
+							},
+						},
+					},
+					SelectableFields: []apiextensions.SelectableField{
+						{
+							JSONPath: ".field1",
+						},
+						{
+							JSONPath: ".field2",
+						},
+					},
+				},
+			},
+		},
+		{
+			name:                   "pre-version SelectableFields, For update, FG disabled, oldCRD does not have SelectableFields, SelectableFields in update, dropped",
+			enableSelectableFields: false,
+			crd: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Versions: []apiextensions.CustomResourceDefinitionVersion{
+						{
+							Name: "v1",
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type: "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"field1": {
+											Type: "string",
+										},
+										"field2": {
+											Type: "string",
+										},
+									},
+								},
+							},
+							SelectableFields: []apiextensions.SelectableField{
+								{
+									JSONPath: ".field1",
+								},
+								{
+									JSONPath: ".field2",
+								},
+							},
+						},
+						{
+							Name: "v2",
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type: "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"field3": {
+											Type: "string",
+										},
+										"field4": {
+											Type: "string",
+										},
+									},
+								},
+							},
+							SelectableFields: []apiextensions.SelectableField{
+								{
+									JSONPath: ".field3",
+								},
+								{
+									JSONPath: ".field4",
+								},
+							},
+						},
+					},
+				},
+			},
+			oldCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Versions: []apiextensions.CustomResourceDefinitionVersion{
+						{
+							Name: "v1",
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type: "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"field1": {
+											Type: "string",
+										},
+										"field2": {
+											Type: "string",
+										},
+									},
+								},
+							},
+						},
+						{
+							Name: "v2",
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type: "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"field3": {
+											Type: "string",
+										},
+										"field4": {
+											Type: "string",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCRD: &apiextensions.CustomResourceDefinition{
+				ObjectMeta: metav1.ObjectMeta{Name: "foos.sigs.k8s.io", Annotations: map[string]string{v1beta1.KubeAPIApprovedAnnotation: "valid"}, ResourceVersion: "1"},
+				Spec: apiextensions.CustomResourceDefinitionSpec{
+					Versions: []apiextensions.CustomResourceDefinitionVersion{
+						{
+							Name: "v1",
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type: "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"field1": {
+											Type: "string",
+										},
+										"field2": {
+											Type: "string",
+										},
+									},
+								},
+							},
+						},
+						{
+							Name: "v2",
+							Schema: &apiextensions.CustomResourceValidation{
+								OpenAPIV3Schema: &apiextensions.JSONSchemaProps{
+									Type: "object",
+									Properties: map[string]apiextensions.JSONSchemaProps{
+										"field3": {
+											Type: "string",
+										},
+										"field4": {
+											Type: "string",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateEmulationVersionDuringTest(t, utilfeature.DefaultFeatureGate, version.MustParse("1.31"))
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CRDValidationRatcheting, tc.enableRatcheting)
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceFieldSelectors, tc.enableSelectableFields)
+			old := tc.oldCRD.DeepCopy()
 
+			dropDisabledFields(tc.crd, tc.oldCRD)
+
+			// old crd should never be changed
+			if diff := cmp.Diff(tc.oldCRD, old); diff != "" {
+				t.Fatalf("old crd changed from %v to %v\n%v", tc.oldCRD, old, diff)
+			}
+
+			if diff := cmp.Diff(tc.expectedCRD, tc.crd); diff != "" {
+				t.Fatalf("unexpected crd: %v\n%v", tc.crd, diff)
+			}
+		})
+	}
 }

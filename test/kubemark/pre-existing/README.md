@@ -23,7 +23,7 @@ resources provided by the VM at $MASTER_IP will serve as the kubemark master.
 ## Use Case
 
 The goal of the pre-existing provider is to use the kubemark tools with an
-existing kubermark master. It's meant to provide the developer with
+existing kubemark master. It's meant to provide the developer with
 additional flexibility to customize the cluster infrastructure and still use
 the kubemark setup tools.  The pre-existing provider is an **advanced** use
 case that requires the developer to have knowledge of setting up a kubemark
@@ -32,7 +32,7 @@ master.
 ## Requirements
 
 To use the pre-existing provider, the expectation is that there's a kubemark
-master that is rechable at $MASTER_IP. The machine that the kubemark master is
+master that is reachable at $MASTER_IP. The machine that the kubemark master is
 on has to be ssh able from the host that's executing the kubemark scripts. And
 the user on that machine has to be 'kubernetes'.
 

@@ -17,13 +17,16 @@ limitations under the License.
 package setdefault
 
 import (
+	"context"
 	"testing"
+	"time"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/admission"
+	admissiontesting "k8s.io/apiserver/pkg/admission/testing"
 	"k8s.io/client-go/informers"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	storageutil "k8s.io/kubernetes/pkg/apis/storage/util"
@@ -93,6 +96,30 @@ func TestAdmission(t *testing.T) {
 			},
 		},
 		Provisioner: "nondefault1",
+	}
+	classWithCreateTime1 := &storagev1.StorageClass{
+		TypeMeta: metav1.TypeMeta{
+			Kind: "StorageClass",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "default1",
+			CreationTimestamp: metav1.NewTime(time.Date(2022, time.Month(1), 1, 0, 0, 0, 1, time.UTC)),
+			Annotations: map[string]string{
+				storageutil.IsDefaultStorageClassAnnotation: "true",
+			},
+		},
+	}
+	classWithCreateTime2 := &storagev1.StorageClass{
+		TypeMeta: metav1.TypeMeta{
+			Kind: "StorageClass",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "default2",
+			CreationTimestamp: metav1.NewTime(time.Date(2022, time.Month(1), 1, 0, 0, 0, 0, time.UTC)),
+			Annotations: map[string]string{
+				storageutil.IsDefaultStorageClassAnnotation: "true",
+			},
+		},
 	}
 
 	claimWithClass := &api.PersistentVolumeClaim{
@@ -165,13 +192,6 @@ func TestAdmission(t *testing.T) {
 			"foo",
 		},
 		{
-			"two defaults, error with PVC with class=nil",
-			[]*storagev1.StorageClass{defaultClass1, defaultClass2, classWithFalseDefault, classWithNoDefault, classWithEmptyDefault},
-			claimWithNoClass,
-			true,
-			"",
-		},
-		{
 			"two defaults, no modification of PVC with class=''",
 			[]*storagev1.StorageClass{defaultClass1, defaultClass2, classWithFalseDefault, classWithNoDefault, classWithEmptyDefault},
 			claimWithEmptyClass,
@@ -184,6 +204,20 @@ func TestAdmission(t *testing.T) {
 			claimWithClass,
 			false,
 			"foo",
+		},
+		{
+			"two defaults with same creation time, choose the one with smaller name",
+			[]*storagev1.StorageClass{defaultClass1, defaultClass2, classWithFalseDefault, classWithNoDefault, classWithEmptyDefault},
+			claimWithNoClass,
+			false,
+			defaultClass1.Name,
+		},
+		{
+			"two defaults, choose the one with newer creation time",
+			[]*storagev1.StorageClass{classWithCreateTime1, classWithCreateTime2, classWithFalseDefault, classWithNoDefault, classWithEmptyDefault},
+			claimWithNoClass,
+			false,
+			classWithCreateTime1.Name,
 		},
 	}
 
@@ -212,7 +246,7 @@ func TestAdmission(t *testing.T) {
 			false, // dryRun
 			nil,   // userInfo
 		)
-		err := ctrl.Admit(attrs, nil)
+		err := admissiontesting.WithReinvocationTesting(t, ctrl).Admit(context.TODO(), attrs, nil)
 		klog.Infof("Got %v", err)
 		if err != nil && !test.expectError {
 			t.Errorf("Test %q: unexpected error received: %v", test.name, err)

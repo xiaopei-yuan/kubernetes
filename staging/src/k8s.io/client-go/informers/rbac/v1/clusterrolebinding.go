@@ -19,15 +19,16 @@ limitations under the License.
 package v1
 
 import (
+	context "context"
 	time "time"
 
-	rbacv1 "k8s.io/api/rbac/v1"
+	apirbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
 	internalinterfaces "k8s.io/client-go/informers/internalinterfaces"
 	kubernetes "k8s.io/client-go/kubernetes"
-	v1 "k8s.io/client-go/listers/rbac/v1"
+	rbacv1 "k8s.io/client-go/listers/rbac/v1"
 	cache "k8s.io/client-go/tools/cache"
 )
 
@@ -35,7 +36,7 @@ import (
 // ClusterRoleBindings.
 type ClusterRoleBindingInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1.ClusterRoleBindingLister
+	Lister() rbacv1.ClusterRoleBindingLister
 }
 
 type clusterRoleBindingInformer struct {
@@ -60,16 +61,16 @@ func NewFilteredClusterRoleBindingInformer(client kubernetes.Interface, resyncPe
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.RbacV1().ClusterRoleBindings().List(options)
+				return client.RbacV1().ClusterRoleBindings().List(context.TODO(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.RbacV1().ClusterRoleBindings().Watch(options)
+				return client.RbacV1().ClusterRoleBindings().Watch(context.TODO(), options)
 			},
 		},
-		&rbacv1.ClusterRoleBinding{},
+		&apirbacv1.ClusterRoleBinding{},
 		resyncPeriod,
 		indexers,
 	)
@@ -80,9 +81,9 @@ func (f *clusterRoleBindingInformer) defaultInformer(client kubernetes.Interface
 }
 
 func (f *clusterRoleBindingInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&rbacv1.ClusterRoleBinding{}, f.defaultInformer)
+	return f.factory.InformerFor(&apirbacv1.ClusterRoleBinding{}, f.defaultInformer)
 }
 
-func (f *clusterRoleBindingInformer) Lister() v1.ClusterRoleBindingLister {
-	return v1.NewClusterRoleBindingLister(f.Informer().GetIndexer())
+func (f *clusterRoleBindingInformer) Lister() rbacv1.ClusterRoleBindingLister {
+	return rbacv1.NewClusterRoleBindingLister(f.Informer().GetIndexer())
 }

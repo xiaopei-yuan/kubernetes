@@ -17,16 +17,22 @@ limitations under the License.
 package types
 
 const (
-	// system default DNS resolver configuration
+	// ResolvConfDefault is the system default DNS resolver configuration.
 	ResolvConfDefault = "/etc/resolv.conf"
+)
 
-	// different container runtimes
-	DockerContainerRuntime = "docker"
-	RemoteContainerRuntime = "remote"
+// User visible keys for managing node allocatable enforcement on the node.
+const (
+	NodeAllocatableEnforcementKey            = "pods"
+	SystemReservedEnforcementKey             = "system-reserved"
+	SystemReservedCompressibleEnforcementKey = "system-reserved-compressible"
+	KubeReservedEnforcementKey               = "kube-reserved"
+	KubeReservedCompressibleEnforcementKey   = "kube-reserved-compressible"
+	NodeAllocatableNoneKey                   = "none"
+)
 
-	// User visible keys for managing node allocatable enforcement on the node.
-	NodeAllocatableEnforcementKey = "pods"
-	SystemReservedEnforcementKey  = "system-reserved"
-	KubeReservedEnforcementKey    = "kube-reserved"
-	NodeAllocatableNoneKey        = "none"
+// SwapBehavior types
+const (
+	LimitedSwap = "LimitedSwap"
+	NoSwap      = "NoSwap"
 )

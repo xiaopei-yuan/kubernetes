@@ -19,15 +19,16 @@ limitations under the License.
 package v1
 
 import (
+	context "context"
 	time "time"
 
-	appsv1 "k8s.io/api/apps/v1"
+	apiappsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
 	internalinterfaces "k8s.io/client-go/informers/internalinterfaces"
 	kubernetes "k8s.io/client-go/kubernetes"
-	v1 "k8s.io/client-go/listers/apps/v1"
+	appsv1 "k8s.io/client-go/listers/apps/v1"
 	cache "k8s.io/client-go/tools/cache"
 )
 
@@ -35,7 +36,7 @@ import (
 // ControllerRevisions.
 type ControllerRevisionInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1.ControllerRevisionLister
+	Lister() appsv1.ControllerRevisionLister
 }
 
 type controllerRevisionInformer struct {
@@ -61,16 +62,16 @@ func NewFilteredControllerRevisionInformer(client kubernetes.Interface, namespac
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.AppsV1().ControllerRevisions(namespace).List(options)
+				return client.AppsV1().ControllerRevisions(namespace).List(context.TODO(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.AppsV1().ControllerRevisions(namespace).Watch(options)
+				return client.AppsV1().ControllerRevisions(namespace).Watch(context.TODO(), options)
 			},
 		},
-		&appsv1.ControllerRevision{},
+		&apiappsv1.ControllerRevision{},
 		resyncPeriod,
 		indexers,
 	)
@@ -81,9 +82,9 @@ func (f *controllerRevisionInformer) defaultInformer(client kubernetes.Interface
 }
 
 func (f *controllerRevisionInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&appsv1.ControllerRevision{}, f.defaultInformer)
+	return f.factory.InformerFor(&apiappsv1.ControllerRevision{}, f.defaultInformer)
 }
 
-func (f *controllerRevisionInformer) Lister() v1.ControllerRevisionLister {
-	return v1.NewControllerRevisionLister(f.Informer().GetIndexer())
+func (f *controllerRevisionInformer) Lister() appsv1.ControllerRevisionLister {
+	return appsv1.NewControllerRevisionLister(f.Informer().GetIndexer())
 }

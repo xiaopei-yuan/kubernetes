@@ -17,8 +17,8 @@ limitations under the License.
 package testing
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"time"
@@ -28,13 +28,21 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
+	"k8s.io/component-base/configz"
+	logsapi "k8s.io/component-base/logs/api/v1"
 	"k8s.io/kubernetes/cmd/kube-scheduler/app"
 	kubeschedulerconfig "k8s.io/kubernetes/cmd/kube-scheduler/app/config"
 	"k8s.io/kubernetes/cmd/kube-scheduler/app/options"
 
-	// import DefaultProvider
-	_ "k8s.io/kubernetes/pkg/scheduler/algorithmprovider/defaults"
+	"k8s.io/klog/v2"
 )
+
+func init() {
+	// If instantiated more than once or together with other servers, the
+	// servers would try to modify the global logging state. This must get
+	// ignored during testing.
+	logsapi.ReapplyHandling = logsapi.ReapplyHandlingIgnoreUnchanged
+}
 
 // TearDownFunc is to be called to tear down a test server.
 type TearDownFunc func()
@@ -48,26 +56,33 @@ type TestServer struct {
 	TmpDir               string       // Temp Dir used, by the apiserver
 }
 
-// Logger allows t.Testing and b.Testing to be passed to StartTestServer and StartTestServerOrDie
-type Logger interface {
-	Errorf(format string, args ...interface{})
-	Fatalf(format string, args ...interface{})
-	Logf(format string, args ...interface{})
-}
-
 // StartTestServer starts a kube-scheduler. A rest client config and a tear-down func,
 // and location of the tmpdir are returned.
 //
 // Note: we return a tear-down func instead of a stop channel because the later will leak temporary
-// 		 files that because Golang testing's call to os.Exit will not give a stop channel go routine
-// 		 enough time to remove temporary files.
-func StartTestServer(t Logger, customFlags []string) (result TestServer, err error) {
-	stopCh := make(chan struct{})
+//
+//	files that because Golang testing's call to os.Exit will not give a stop channel go routine
+//	enough time to remove temporary files.
+func StartTestServer(ctx context.Context, customFlags []string) (result TestServer, err error) {
+	logger := klog.FromContext(ctx)
+	ctx, cancel := context.WithCancel(ctx)
+
+	var errCh chan error
 	tearDown := func() {
-		close(stopCh)
+		cancel()
+
+		// If the scheduler was started, let's wait for it to
+		// shutdown clearly.
+		if errCh != nil {
+			err, ok := <-errCh
+			if ok && err != nil {
+				logger.Error(err, "Failed to shutdown test server clearly")
+			}
+		}
 		if len(result.TmpDir) != 0 {
 			os.RemoveAll(result.TmpDir)
 		}
+		configz.Delete("componentconfig")
 	}
 	defer func() {
 		if result.TearDownFn == nil {
@@ -75,69 +90,59 @@ func StartTestServer(t Logger, customFlags []string) (result TestServer, err err
 		}
 	}()
 
-	result.TmpDir, err = ioutil.TempDir("", "kube-scheduler")
+	result.TmpDir, err = os.MkdirTemp("", "kube-scheduler")
 	if err != nil {
 		return result, fmt.Errorf("failed to create temp dir: %v", err)
 	}
 
 	fs := pflag.NewFlagSet("test", pflag.PanicOnError)
 
-	s, err := options.NewOptions()
-	if err != nil {
-		return TestServer{}, err
-	}
-	namedFlagSets := s.Flags()
-	for _, f := range namedFlagSets.FlagSets {
+	opts := options.NewOptions()
+	nfs := opts.Flags
+	for _, f := range nfs.FlagSets {
 		fs.AddFlagSet(f)
 	}
-
 	fs.Parse(customFlags)
+	if err := opts.ComponentGlobalsRegistry.Set(); err != nil {
+		return result, err
+	}
 
-	if s.SecureServing.BindPort != 0 {
-		s.SecureServing.Listener, s.SecureServing.BindPort, err = createListenerOnFreePort()
+	if opts.SecureServing.BindPort != 0 {
+		opts.SecureServing.Listener, opts.SecureServing.BindPort, err = createListenerOnFreePort()
 		if err != nil {
 			return result, fmt.Errorf("failed to create listener: %v", err)
 		}
-		s.SecureServing.ServerCert.CertDirectory = result.TmpDir
+		opts.SecureServing.ServerCert.CertDirectory = result.TmpDir
 
-		t.Logf("kube-scheduler will listen securely on port %d...", s.SecureServing.BindPort)
+		logger.Info("kube-scheduler will listen securely", "port", opts.SecureServing.BindPort)
 	}
 
-	if s.CombinedInsecureServing.BindPort != 0 {
-		listener, port, err := createListenerOnFreePort()
-		if err != nil {
-			return result, fmt.Errorf("failed to create listener: %v", err)
-		}
-		s.CombinedInsecureServing.BindPort = port
-		s.CombinedInsecureServing.Healthz.Listener = listener
-		s.CombinedInsecureServing.Metrics.Listener = listener
-		t.Logf("kube-scheduler will listen insecurely on port %d...", s.CombinedInsecureServing.BindPort)
-	}
-	config, err := s.Config()
+	cc, sched, err := app.Setup(ctx, opts)
 	if err != nil {
 		return result, fmt.Errorf("failed to create config from options: %v", err)
 	}
 
-	errCh := make(chan error)
-	go func(stopCh <-chan struct{}) {
-		if err := app.Run(config.Complete(), stopCh); err != nil {
+	errCh = make(chan error)
+	go func(ctx context.Context) {
+		defer close(errCh)
+		if err := app.Run(ctx, cc, sched); err != nil {
 			errCh <- err
 		}
-	}(stopCh)
+	}(ctx)
 
-	t.Logf("Waiting for /healthz to be ok...")
-	client, err := kubernetes.NewForConfig(config.LoopbackClientConfig)
+	logger.Info("Waiting for /healthz to be ok...")
+	client, err := kubernetes.NewForConfig(cc.LoopbackClientConfig)
 	if err != nil {
 		return result, fmt.Errorf("failed to create a client: %v", err)
 	}
-	err = wait.Poll(100*time.Millisecond, 30*time.Second, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 30*time.Second, false, func(ctx context.Context) (bool, error) {
 		select {
 		case err := <-errCh:
 			return false, err
 		default:
 		}
 
-		result := client.CoreV1().RESTClient().Get().AbsPath("/healthz").Do()
+		result := client.CoreV1().RESTClient().Get().AbsPath("/healthz").Do(ctx)
 		status := 0
 		result.StatusCode(&status)
 		if status == 200 {
@@ -150,23 +155,22 @@ func StartTestServer(t Logger, customFlags []string) (result TestServer, err err
 	}
 
 	// from here the caller must call tearDown
-	result.LoopbackClientConfig = config.LoopbackClientConfig
-	result.Options = s
-	result.Config = config
+	result.LoopbackClientConfig = cc.LoopbackClientConfig
+	result.Options = opts
+	result.Config = cc.Config
 	result.TearDownFn = tearDown
 
 	return result, nil
 }
 
-// StartTestServerOrDie calls StartTestServer t.Fatal if it does not succeed.
-func StartTestServerOrDie(t Logger, flags []string) *TestServer {
-	result, err := StartTestServer(t, flags)
+// StartTestServerOrDie calls StartTestServer panic if it does not succeed.
+func StartTestServerOrDie(ctx context.Context, flags []string) *TestServer {
+	result, err := StartTestServer(ctx, flags)
 	if err == nil {
 		return &result
 	}
 
-	t.Fatalf("failed to launch server: %v", err)
-	return nil
+	panic(fmt.Errorf("failed to launch server: %v", err))
 }
 
 func createListenerOnFreePort() (net.Listener, int, error) {

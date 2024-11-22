@@ -19,15 +19,16 @@ limitations under the License.
 package v1beta1
 
 import (
+	context "context"
 	time "time"
 
-	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
+	apiadmissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
 	internalinterfaces "k8s.io/client-go/informers/internalinterfaces"
 	kubernetes "k8s.io/client-go/kubernetes"
-	v1beta1 "k8s.io/client-go/listers/admissionregistration/v1beta1"
+	admissionregistrationv1beta1 "k8s.io/client-go/listers/admissionregistration/v1beta1"
 	cache "k8s.io/client-go/tools/cache"
 )
 
@@ -35,7 +36,7 @@ import (
 // MutatingWebhookConfigurations.
 type MutatingWebhookConfigurationInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1beta1.MutatingWebhookConfigurationLister
+	Lister() admissionregistrationv1beta1.MutatingWebhookConfigurationLister
 }
 
 type mutatingWebhookConfigurationInformer struct {
@@ -60,16 +61,16 @@ func NewFilteredMutatingWebhookConfigurationInformer(client kubernetes.Interface
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.AdmissionregistrationV1beta1().MutatingWebhookConfigurations().List(options)
+				return client.AdmissionregistrationV1beta1().MutatingWebhookConfigurations().List(context.TODO(), options)
 			},
 			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.AdmissionregistrationV1beta1().MutatingWebhookConfigurations().Watch(options)
+				return client.AdmissionregistrationV1beta1().MutatingWebhookConfigurations().Watch(context.TODO(), options)
 			},
 		},
-		&admissionregistrationv1beta1.MutatingWebhookConfiguration{},
+		&apiadmissionregistrationv1beta1.MutatingWebhookConfiguration{},
 		resyncPeriod,
 		indexers,
 	)
@@ -80,9 +81,9 @@ func (f *mutatingWebhookConfigurationInformer) defaultInformer(client kubernetes
 }
 
 func (f *mutatingWebhookConfigurationInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&admissionregistrationv1beta1.MutatingWebhookConfiguration{}, f.defaultInformer)
+	return f.factory.InformerFor(&apiadmissionregistrationv1beta1.MutatingWebhookConfiguration{}, f.defaultInformer)
 }
 
-func (f *mutatingWebhookConfigurationInformer) Lister() v1beta1.MutatingWebhookConfigurationLister {
-	return v1beta1.NewMutatingWebhookConfigurationLister(f.Informer().GetIndexer())
+func (f *mutatingWebhookConfigurationInformer) Lister() admissionregistrationv1beta1.MutatingWebhookConfigurationLister {
+	return admissionregistrationv1beta1.NewMutatingWebhookConfigurationLister(f.Informer().GetIndexer())
 }

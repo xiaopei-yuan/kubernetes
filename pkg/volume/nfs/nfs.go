@@ -19,20 +19,28 @@ package nfs
 import (
 	"fmt"
 	"os"
-	"runtime"
+	"time"
 
-	"k8s.io/api/core/v1"
+	netutil "k8s.io/utils/net"
+
+	"k8s.io/klog/v2"
+	"k8s.io/mount-utils"
+	utilstrings "k8s.io/utils/strings"
+
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog"
-	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/kubernetes/pkg/volume/util/recyclerclient"
-	utilstrings "k8s.io/utils/strings"
 )
 
+func getPath(uid types.UID, volName string, host volume.VolumeHost) string {
+	return host.GetPodVolumeDir(uid, utilstrings.EscapeQualifiedName(nfsPluginName), volName)
+}
+
 // ProbeVolumePlugins is the primary entrypoint for volume plugins.
+// This is the primary entrypoint for volume plugins.
 // The volumeConfig arg provides the ability to configure recycler behavior.  It is implemented as a pointer to allow nils.
 // The nfsPlugin is used to store the volumeConfig and give it, when needed, to the func that creates NFS Recyclers.
 // Tests that exercise recycling should not use this func but instead use ProbeRecyclablePlugins() to override default behavior.
@@ -55,7 +63,8 @@ var _ volume.PersistentVolumePlugin = &nfsPlugin{}
 var _ volume.RecyclableVolumePlugin = &nfsPlugin{}
 
 const (
-	nfsPluginName = "kubernetes.io/nfs"
+	nfsPluginName  = "kubernetes.io/nfs"
+	unMountTimeout = time.Minute
 )
 
 func (plugin *nfsPlugin) Init(host volume.VolumeHost) error {
@@ -84,11 +93,7 @@ func (plugin *nfsPlugin) CanSupport(spec *volume.Spec) bool {
 		(spec.Volume != nil && spec.Volume.NFS != nil)
 }
 
-func (plugin *nfsPlugin) IsMigratedToCSI() bool {
-	return false
-}
-
-func (plugin *nfsPlugin) RequiresRemount() bool {
+func (plugin *nfsPlugin) RequiresRemount(spec *volume.Spec) bool {
 	return false
 }
 
@@ -96,8 +101,8 @@ func (plugin *nfsPlugin) SupportsMountOption() bool {
 	return true
 }
 
-func (plugin *nfsPlugin) SupportsBulkVolumeVerification() bool {
-	return false
+func (plugin *nfsPlugin) SupportsSELinuxContextMount(spec *volume.Spec) (bool, error) {
+	return false, nil
 }
 
 func (plugin *nfsPlugin) GetAccessModes() []v1.PersistentVolumeAccessMode {
@@ -108,7 +113,7 @@ func (plugin *nfsPlugin) GetAccessModes() []v1.PersistentVolumeAccessMode {
 	}
 }
 
-func (plugin *nfsPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod, _ volume.VolumeOptions) (volume.Mounter, error) {
+func (plugin *nfsPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod) (volume.Mounter, error) {
 	return plugin.newMounterInternal(spec, pod, plugin.host.GetMounter(plugin.GetPluginName()))
 }
 
@@ -117,15 +122,15 @@ func (plugin *nfsPlugin) newMounterInternal(spec *volume.Spec, pod *v1.Pod, moun
 	if err != nil {
 		return nil, err
 	}
-
 	return &nfsMounter{
 		nfs: &nfs{
-			volName: spec.Name(),
-			mounter: mounter,
-			pod:     pod,
-			plugin:  plugin,
+			volName:         spec.Name(),
+			mounter:         mounter,
+			pod:             pod,
+			plugin:          plugin,
+			MetricsProvider: volume.NewMetricsStatFS(getPath(pod.UID, spec.Name(), plugin.host)),
 		},
-		server:       source.Server,
+		server:       getServerFromSource(source),
 		exportPath:   source.Path,
 		readOnly:     readOnly,
 		mountOptions: util.MountOptionFromSpec(spec),
@@ -138,10 +143,11 @@ func (plugin *nfsPlugin) NewUnmounter(volName string, podUID types.UID) (volume.
 
 func (plugin *nfsPlugin) newUnmounterInternal(volName string, podUID types.UID, mounter mount.Interface) (volume.Unmounter, error) {
 	return &nfsUnmounter{&nfs{
-		volName: volName,
-		mounter: mounter,
-		pod:     &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: podUID}},
-		plugin:  plugin,
+		volName:         volName,
+		mounter:         mounter,
+		pod:             &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: podUID}},
+		plugin:          plugin,
+		MetricsProvider: volume.NewMetricsStatFS(getPath(podUID, volName, plugin.host)),
 	}}, nil
 }
 
@@ -166,7 +172,7 @@ func (plugin *nfsPlugin) Recycle(pvName string, spec *volume.Spec, eventRecorder
 	return recyclerclient.RecycleVolumeByWatchingPodUntilCompletion(pvName, pod, plugin.host.GetKubeClient(), eventRecorder)
 }
 
-func (plugin *nfsPlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volume.Spec, error) {
+func (plugin *nfsPlugin) ConstructVolumeSpec(volumeName, mountPath string) (volume.ReconstructedVolume, error) {
 	nfsVolume := &v1.Volume{
 		Name: volumeName,
 		VolumeSource: v1.VolumeSource{
@@ -175,7 +181,9 @@ func (plugin *nfsPlugin) ConstructVolumeSpec(volumeName, mountPath string) (*vol
 			},
 		},
 	}
-	return volume.NewSpecFromVolume(nfsVolume), nil
+	return volume.ReconstructedVolume{
+		Spec: volume.NewSpecFromVolume(nfsVolume),
+	}, nil
 }
 
 // NFS volumes represent a bare host file or directory mount of an NFS export.
@@ -184,34 +192,12 @@ type nfs struct {
 	pod     *v1.Pod
 	mounter mount.Interface
 	plugin  *nfsPlugin
-	volume.MetricsNil
+	volume.MetricsProvider
 }
 
 func (nfsVolume *nfs) GetPath() string {
 	name := nfsPluginName
 	return nfsVolume.plugin.host.GetPodVolumeDir(nfsVolume.pod.UID, utilstrings.EscapeQualifiedName(name), nfsVolume.volName)
-}
-
-// Checks prior to mount operations to verify that the required components (binaries, etc.)
-// to mount the volume are available on the underlying node.
-// If not, it returns an error
-func (nfsMounter *nfsMounter) CanMount() error {
-	exec := nfsMounter.plugin.host.GetExec(nfsMounter.plugin.GetPluginName())
-	switch runtime.GOOS {
-	case "linux":
-		if _, err := exec.Run("test", "-x", "/sbin/mount.nfs"); err != nil {
-			return fmt.Errorf("Required binary /sbin/mount.nfs is missing")
-		}
-		if _, err := exec.Run("test", "-x", "/sbin/mount.nfs4"); err != nil {
-			return fmt.Errorf("Required binary /sbin/mount.nfs4 is missing")
-		}
-		return nil
-	case "darwin":
-		if _, err := exec.Run("test", "-x", "/sbin/mount_nfs"); err != nil {
-			return fmt.Errorf("Required binary /sbin/mount_nfs is missing")
-		}
-	}
-	return nil
 }
 
 type nfsMounter struct {
@@ -226,18 +212,18 @@ var _ volume.Mounter = &nfsMounter{}
 
 func (nfsMounter *nfsMounter) GetAttributes() volume.Attributes {
 	return volume.Attributes{
-		ReadOnly:        nfsMounter.readOnly,
-		Managed:         false,
-		SupportsSELinux: false,
+		ReadOnly:       nfsMounter.readOnly,
+		Managed:        false,
+		SELinuxRelabel: false,
 	}
 }
 
 // SetUp attaches the disk and bind mounts to the volume path.
-func (nfsMounter *nfsMounter) SetUp(fsGroup *int64) error {
-	return nfsMounter.SetUpAt(nfsMounter.GetPath(), fsGroup)
+func (nfsMounter *nfsMounter) SetUp(mounterArgs volume.MounterArgs) error {
+	return nfsMounter.SetUpAt(nfsMounter.GetPath(), mounterArgs)
 }
 
-func (nfsMounter *nfsMounter) SetUpAt(dir string, fsGroup *int64) error {
+func (nfsMounter *nfsMounter) SetUpAt(dir string, mounterArgs volume.MounterArgs) error {
 	notMnt, err := mount.IsNotMountPoint(nfsMounter.mounter, dir)
 	klog.V(4).Infof("NFS mount set up: %s %v %v", dir, !notMnt, err)
 	if err != nil && !os.IsNotExist(err) {
@@ -255,7 +241,7 @@ func (nfsMounter *nfsMounter) SetUpAt(dir string, fsGroup *int64) error {
 		options = append(options, "ro")
 	}
 	mountOptions := util.JoinMountOptions(nfsMounter.mountOptions, options)
-	err = nfsMounter.mounter.Mount(source, dir, "nfs", mountOptions)
+	err = nfsMounter.mounter.MountSensitiveWithoutSystemd(source, dir, "nfs", mountOptions, nil)
 	if err != nil {
 		notMnt, mntErr := mount.IsNotMountPoint(nfsMounter.mounter, dir)
 		if mntErr != nil {
@@ -298,6 +284,11 @@ func (c *nfsUnmounter) TearDownAt(dir string) error {
 	// Use extensiveMountPointCheck to consult /proc/mounts. We can't use faster
 	// IsLikelyNotMountPoint (lstat()), since there may be root_squash on the
 	// NFS server and kubelet may not be able to do lstat/stat() there.
+	forceUnmounter, ok := c.mounter.(mount.MounterForceUnmounter)
+	if ok {
+		klog.V(4).Infof("Using force unmounter interface")
+		return mount.CleanupMountWithForce(dir, forceUnmounter, true /* extensiveMountPointCheck */, unMountTimeout)
+	}
 	return mount.CleanupMountPoint(dir, c.mounter, true /* extensiveMountPointCheck */)
 }
 
@@ -310,4 +301,11 @@ func getVolumeSource(spec *volume.Spec) (*v1.NFSVolumeSource, bool, error) {
 	}
 
 	return nil, false, fmt.Errorf("Spec does not reference a NFS volume type")
+}
+
+func getServerFromSource(source *v1.NFSVolumeSource) string {
+	if netutil.IsIPv6String(source.Server) {
+		return fmt.Sprintf("[%s]", source.Server)
+	}
+	return source.Server
 }

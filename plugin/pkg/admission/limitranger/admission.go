@@ -17,14 +17,14 @@ limitations under the License.
 package limitranger
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/hashicorp/golang-lru"
-
+	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -32,12 +32,17 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/admission"
 	genericadmissioninitailizer "k8s.io/apiserver/pkg/admission/initializer"
+	"k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	corev1listers "k8s.io/client-go/listers/core/v1"
+	"k8s.io/utils/lru"
+
 	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/features"
 )
 
 const (
@@ -64,6 +69,7 @@ type LimitRanger struct {
 	// This let's us handle the case of latent caches, by looking up actual results for a namespace on cache miss/no results.
 	// We track the lookup result here so that for repeated requests, we don't look it up very often.
 	liveLookupCache *lru.Cache
+	group           singleflight.Group
 	liveTTL         time.Duration
 }
 
@@ -78,16 +84,19 @@ type liveLookupEntry struct {
 	items  []*corev1.LimitRange
 }
 
+// SetExternalKubeInformerFactory registers an informer factory into the LimitRanger
 func (l *LimitRanger) SetExternalKubeInformerFactory(f informers.SharedInformerFactory) {
 	limitRangeInformer := f.Core().V1().LimitRanges()
 	l.SetReadyFunc(limitRangeInformer.Informer().HasSynced)
 	l.lister = limitRangeInformer.Lister()
 }
 
-func (a *LimitRanger) SetExternalKubeClientSet(client kubernetes.Interface) {
-	a.client = client
+// SetExternalKubeClientSet registers the client into LimitRanger
+func (l *LimitRanger) SetExternalKubeClientSet(client kubernetes.Interface) {
+	l.client = client
 }
 
+// ValidateInitialization verifies the LimitRanger object has been properly initialized
 func (l *LimitRanger) ValidateInitialization() error {
 	if l.lister == nil {
 		return fmt.Errorf("missing limitRange lister")
@@ -99,12 +108,12 @@ func (l *LimitRanger) ValidateInitialization() error {
 }
 
 // Admit admits resources into cluster that do not violate any defined LimitRange in the namespace
-func (l *LimitRanger) Admit(a admission.Attributes, o admission.ObjectInterfaces) (err error) {
+func (l *LimitRanger) Admit(ctx context.Context, a admission.Attributes, o admission.ObjectInterfaces) (err error) {
 	return l.runLimitFunc(a, l.actions.MutateLimit)
 }
 
 // Validate admits resources into cluster that do not violate any defined LimitRange in the namespace
-func (l *LimitRanger) Validate(a admission.Attributes, o admission.ObjectInterfaces) (err error) {
+func (l *LimitRanger) Validate(ctx context.Context, a admission.Attributes, o admission.ObjectInterfaces) (err error) {
 	return l.runLimitFunc(a, l.actions.ValidateLimit)
 }
 
@@ -146,6 +155,8 @@ func (l *LimitRanger) runLimitFunc(a admission.Attributes, limitFn func(limitRan
 	return nil
 }
 
+// GetLimitRanges returns a LimitRange object with the items held in
+// the indexer if available, or do alive lookup of the value.
 func (l *LimitRanger) GetLimitRanges(a admission.Attributes) ([]*corev1.LimitRange, error) {
 	items, err := l.lister.LimitRanges(a.GetNamespace()).List(labels.Everything())
 	if err != nil {
@@ -156,27 +167,27 @@ func (l *LimitRanger) GetLimitRanges(a admission.Attributes) ([]*corev1.LimitRan
 	if len(items) == 0 {
 		lruItemObj, ok := l.liveLookupCache.Get(a.GetNamespace())
 		if !ok || lruItemObj.(liveLookupEntry).expiry.Before(time.Now()) {
-			// TODO: If there are multiple operations at the same time and cache has just expired,
-			// this may cause multiple List operations being issued at the same time.
-			// If there is already in-flight List() for a given namespace, we should wait until
-			// it is finished and cache is updated instead of doing the same, also to avoid
-			// throttling - see #22422 for details.
-			liveList, err := l.client.CoreV1().LimitRanges(a.GetNamespace()).List(metav1.ListOptions{})
+			// Fixed: #22422
+			// use singleflight to alleviate simultaneous calls to
+			lruItemObj, err, _ = l.group.Do(a.GetNamespace(), func() (interface{}, error) {
+				liveList, err := l.client.CoreV1().LimitRanges(a.GetNamespace()).List(context.TODO(), metav1.ListOptions{})
+				if err != nil {
+					return nil, admission.NewForbidden(a, err)
+				}
+				newEntry := liveLookupEntry{expiry: time.Now().Add(l.liveTTL)}
+				for i := range liveList.Items {
+					newEntry.items = append(newEntry.items, &liveList.Items[i])
+				}
+				l.liveLookupCache.Add(a.GetNamespace(), newEntry)
+				return newEntry, nil
+			})
 			if err != nil {
-				return nil, admission.NewForbidden(a, err)
+				return nil, err
 			}
-			newEntry := liveLookupEntry{expiry: time.Now().Add(l.liveTTL)}
-			for i := range liveList.Items {
-				newEntry.items = append(newEntry.items, &liveList.Items[i])
-			}
-			l.liveLookupCache.Add(a.GetNamespace(), newEntry)
-			lruItemObj = newEntry
 		}
 		lruEntry := lruItemObj.(liveLookupEntry)
 
-		for i := range lruEntry.items {
-			items = append(items, lruEntry.items[i])
-		}
+		items = append(items, lruEntry.items...)
 
 	}
 
@@ -185,10 +196,7 @@ func (l *LimitRanger) GetLimitRanges(a admission.Attributes) ([]*corev1.LimitRan
 
 // NewLimitRanger returns an object that enforces limits based on the supplied limit function
 func NewLimitRanger(actions LimitRangerActions) (*LimitRanger, error) {
-	liveLookupCache, err := lru.New(10000)
-	if err != nil {
-		return nil, err
-	}
+	liveLookupCache := lru.New(10000)
 
 	if actions == nil {
 		actions = &DefaultLimitRangerActions{}
@@ -214,12 +222,10 @@ func defaultContainerResourceRequirements(limitRange *corev1.LimitRange) api.Res
 		limit := limitRange.Spec.Limits[i]
 		if limit.Type == corev1.LimitTypeContainer {
 			for k, v := range limit.DefaultRequest {
-				value := v.Copy()
-				requirements.Requests[api.ResourceName(k)] = *value
+				requirements.Requests[api.ResourceName(k)] = v.DeepCopy()
 			}
 			for k, v := range limit.Default {
-				value := v.Copy()
-				requirements.Limits[api.ResourceName(k)] = *value
+				requirements.Limits[api.ResourceName(k)] = v.DeepCopy()
 			}
 		}
 	}
@@ -239,14 +245,14 @@ func mergeContainerResources(container *api.Container, defaultRequirements *api.
 	for k, v := range defaultRequirements.Limits {
 		_, found := container.Resources.Limits[k]
 		if !found {
-			container.Resources.Limits[k] = *v.Copy()
+			container.Resources.Limits[k] = v.DeepCopy()
 			setLimits = append(setLimits, string(k))
 		}
 	}
 	for k, v := range defaultRequirements.Requests {
 		_, found := container.Resources.Requests[k]
 		if !found {
-			container.Resources.Requests[k] = *v.Copy()
+			container.Resources.Requests[k] = v.DeepCopy()
 			setRequests = append(setRequests, string(k))
 		}
 	}
@@ -306,13 +312,13 @@ func minConstraint(limitType string, resourceName string, enforced resource.Quan
 	observedReqValue, observedLimValue, enforcedValue := requestLimitEnforcedValues(req, lim, enforced)
 
 	if !reqExists {
-		return fmt.Errorf("minimum %s usage per %s is %s.  No request is specified.", resourceName, limitType, enforced.String())
+		return fmt.Errorf("minimum %s usage per %s is %s.  No request is specified", resourceName, limitType, enforced.String())
 	}
 	if observedReqValue < enforcedValue {
-		return fmt.Errorf("minimum %s usage per %s is %s, but request is %s.", resourceName, limitType, enforced.String(), req.String())
+		return fmt.Errorf("minimum %s usage per %s is %s, but request is %s", resourceName, limitType, enforced.String(), req.String())
 	}
 	if limExists && (observedLimValue < enforcedValue) {
-		return fmt.Errorf("minimum %s usage per %s is %s, but limit is %s.", resourceName, limitType, enforced.String(), lim.String())
+		return fmt.Errorf("minimum %s usage per %s is %s, but limit is %s", resourceName, limitType, enforced.String(), lim.String())
 	}
 	return nil
 }
@@ -324,10 +330,10 @@ func maxRequestConstraint(limitType string, resourceName string, enforced resour
 	observedReqValue, _, enforcedValue := requestLimitEnforcedValues(req, resource.Quantity{}, enforced)
 
 	if !reqExists {
-		return fmt.Errorf("maximum %s usage per %s is %s.  No request is specified.", resourceName, limitType, enforced.String())
+		return fmt.Errorf("maximum %s usage per %s is %s.  No request is specified", resourceName, limitType, enforced.String())
 	}
 	if observedReqValue > enforcedValue {
-		return fmt.Errorf("maximum %s usage per %s is %s, but request is %s.", resourceName, limitType, enforced.String(), req.String())
+		return fmt.Errorf("maximum %s usage per %s is %s, but request is %s", resourceName, limitType, enforced.String(), req.String())
 	}
 	return nil
 }
@@ -339,13 +345,13 @@ func maxConstraint(limitType string, resourceName string, enforced resource.Quan
 	observedReqValue, observedLimValue, enforcedValue := requestLimitEnforcedValues(req, lim, enforced)
 
 	if !limExists {
-		return fmt.Errorf("maximum %s usage per %s is %s.  No limit is specified.", resourceName, limitType, enforced.String())
+		return fmt.Errorf("maximum %s usage per %s is %s.  No limit is specified", resourceName, limitType, enforced.String())
 	}
 	if observedLimValue > enforcedValue {
-		return fmt.Errorf("maximum %s usage per %s is %s, but limit is %s.", resourceName, limitType, enforced.String(), lim.String())
+		return fmt.Errorf("maximum %s usage per %s is %s, but limit is %s", resourceName, limitType, enforced.String(), lim.String())
 	}
 	if reqExists && (observedReqValue > enforcedValue) {
-		return fmt.Errorf("maximum %s usage per %s is %s, but request is %s.", resourceName, limitType, enforced.String(), req.String())
+		return fmt.Errorf("maximum %s usage per %s is %s, but request is %s", resourceName, limitType, enforced.String(), req.String())
 	}
 	return nil
 }
@@ -357,10 +363,10 @@ func limitRequestRatioConstraint(limitType string, resourceName string, enforced
 	observedReqValue, observedLimValue, _ := requestLimitEnforcedValues(req, lim, enforced)
 
 	if !reqExists || (observedReqValue == int64(0)) {
-		return fmt.Errorf("%s max limit to request ratio per %s is %s, but no request is specified or request is 0.", resourceName, limitType, enforced.String())
+		return fmt.Errorf("%s max limit to request ratio per %s is %s, but no request is specified or request is 0", resourceName, limitType, enforced.String())
 	}
 	if !limExists || (observedLimValue == int64(0)) {
-		return fmt.Errorf("%s max limit to request ratio per %s is %s, but no limit is specified or limit is 0.", resourceName, limitType, enforced.String())
+		return fmt.Errorf("%s max limit to request ratio per %s is %s, but no limit is specified or limit is 0", resourceName, limitType, enforced.String())
 	}
 
 	observedRatio := float64(observedLimValue) / float64(observedReqValue)
@@ -372,49 +378,10 @@ func limitRequestRatioConstraint(limitType string, resourceName string, enforced
 	}
 
 	if observedRatio > maxLimitRequestRatio {
-		return fmt.Errorf("%s max limit to request ratio per %s is %s, but provided ratio is %f.", resourceName, limitType, enforced.String(), displayObservedRatio)
+		return fmt.Errorf("%s max limit to request ratio per %s is %s, but provided ratio is %f", resourceName, limitType, enforced.String(), displayObservedRatio)
 	}
 
 	return nil
-}
-
-// sum takes the total of each named resource across all inputs
-// if a key is not in each input, then the output resource list will omit the key
-func sum(inputs []api.ResourceList) api.ResourceList {
-	result := api.ResourceList{}
-	keys := []api.ResourceName{}
-	for i := range inputs {
-		for k := range inputs[i] {
-			keys = append(keys, k)
-		}
-	}
-	for _, key := range keys {
-		total, isSet := int64(0), true
-
-		for i := range inputs {
-			input := inputs[i]
-			v, exists := input[key]
-			if exists {
-				if key == api.ResourceCPU {
-					total = total + v.MilliValue()
-				} else {
-					total = total + v.Value()
-				}
-			} else {
-				isSet = false
-			}
-		}
-
-		if isSet {
-			if key == api.ResourceCPU {
-				result[key] = *(resource.NewMilliQuantity(total, resource.DecimalSI))
-			} else {
-				result[key] = *(resource.NewQuantity(total, resource.DecimalSI))
-			}
-
-		}
-	}
-	return result
 }
 
 // DefaultLimitRangerActions is the default implementation of LimitRangerActions.
@@ -423,9 +390,10 @@ type DefaultLimitRangerActions struct{}
 // ensure DefaultLimitRangerActions implements the LimitRangerActions interface.
 var _ LimitRangerActions = &DefaultLimitRangerActions{}
 
-// Limit enforces resource requirements of incoming resources against enumerated constraints
-// on the LimitRange.  It may modify the incoming object to apply default resource requirements
-// if not specified, and enumerated on the LimitRange
+// MutateLimit enforces resource requirements of incoming resources
+// against enumerated constraints on the LimitRange.  It may modify
+// the incoming object to apply default resource requirements if not
+// specified, and enumerated on the LimitRange
 func (d *DefaultLimitRangerActions) MutateLimit(limitRange *corev1.LimitRange, resourceName string, obj runtime.Object) error {
 	switch resourceName {
 	case "pods":
@@ -434,9 +402,9 @@ func (d *DefaultLimitRangerActions) MutateLimit(limitRange *corev1.LimitRange, r
 	return nil
 }
 
-// Limit enforces resource requirements of incoming resources against enumerated constraints
-// on the LimitRange.  It may modify the incoming object to apply default resource requirements
-// if not specified, and enumerated on the LimitRange
+// ValidateLimit verifies the resource requirements of incoming
+// resources against enumerated constraints on the LimitRange are
+// valid
 func (d *DefaultLimitRangerActions) ValidateLimit(limitRange *corev1.LimitRange, resourceName string, obj runtime.Object) error {
 	switch resourceName {
 	case "pods":
@@ -450,6 +418,13 @@ func (d *DefaultLimitRangerActions) ValidateLimit(limitRange *corev1.LimitRange,
 // SupportsAttributes ignores all calls that do not deal with pod resources or storage requests (PVCs).
 // Also ignores any call that has a subresource defined.
 func (d *DefaultLimitRangerActions) SupportsAttributes(a admission.Attributes) bool {
+	// Handle in-place vertical scaling of pods, where users modify container
+	// resources using the resize subresource.
+	if a.GetSubresource() == "resize" && a.GetKind().GroupKind() == api.Kind("Pod") && a.GetOperation() == admission.Update {
+		return true
+	}
+
+	// No other subresources are supported
 	if a.GetSubresource() != "" {
 		return false
 	}
@@ -556,36 +531,11 @@ func PodValidateLimitFunc(limitRange *corev1.LimitRange, pod *api.Pod) error {
 
 		// enforce pod limits on init containers
 		if limitType == corev1.LimitTypePod {
-			containerRequests, containerLimits := []api.ResourceList{}, []api.ResourceList{}
-			for j := range pod.Spec.Containers {
-				container := &pod.Spec.Containers[j]
-				containerRequests = append(containerRequests, container.Resources.Requests)
-				containerLimits = append(containerLimits, container.Resources.Limits)
+			opts := podResourcesOptions{
+				PodLevelResourcesEnabled: feature.DefaultFeatureGate.Enabled(features.PodLevelResources),
 			}
-			podRequests := sum(containerRequests)
-			podLimits := sum(containerLimits)
-			for j := range pod.Spec.InitContainers {
-				container := &pod.Spec.InitContainers[j]
-				// take max(sum_containers, any_init_container)
-				for k, v := range container.Resources.Requests {
-					if v2, ok := podRequests[k]; ok {
-						if v.Cmp(v2) > 0 {
-							podRequests[k] = v
-						}
-					} else {
-						podRequests[k] = v
-					}
-				}
-				for k, v := range container.Resources.Limits {
-					if v2, ok := podLimits[k]; ok {
-						if v.Cmp(v2) > 0 {
-							podLimits[k] = v
-						}
-					} else {
-						podLimits[k] = v
-					}
-				}
-			}
+			podRequests := podRequests(pod, opts)
+			podLimits := podLimits(pod, opts)
 			for k, v := range limit.Min {
 				if err := minConstraint(string(limitType), string(k), v, podRequests, podLimits); err != nil {
 					errs = append(errs, err)
@@ -604,4 +554,157 @@ func PodValidateLimitFunc(limitRange *corev1.LimitRange, pod *api.Pod) error {
 		}
 	}
 	return utilerrors.NewAggregate(errs)
+}
+
+type podResourcesOptions struct {
+	// PodLevelResourcesEnabled indicates that the PodLevelResources feature gate is
+	// enabled.
+	PodLevelResourcesEnabled bool
+}
+
+// podRequests is a simplified version of pkg/api/v1/resource/PodRequests that operates against the core version of
+// pod. Any changes to that calculation should be reflected here.
+// NOTE: We do not want to check status resources here, only the spec. This is equivalent to setting
+// UseStatusResources=false in the common helper.
+// TODO: Maybe we can consider doing a partial conversion of the pod to a v1
+// type and then using the pkg/api/v1/resource/PodRequests.
+// TODO(ndixita): PodRequests method exists in
+// staging/src/k8s.io/component-helpers/resource/helpers.go. Refactor the code to
+// avoid duplicating podRequests method.
+func podRequests(pod *api.Pod, opts podResourcesOptions) api.ResourceList {
+	reqs := api.ResourceList{}
+
+	for _, container := range pod.Spec.Containers {
+		containerReqs := container.Resources.Requests
+		addResourceList(reqs, containerReqs)
+	}
+
+	restartableInitCotnainerReqs := api.ResourceList{}
+	initContainerReqs := api.ResourceList{}
+	// init containers define the minimum of any resource
+	// Note: In-place resize is not allowed for InitContainers, so no need to check for ResizeStatus value
+	for _, container := range pod.Spec.InitContainers {
+		containerReqs := container.Resources.Requests
+
+		if container.RestartPolicy != nil && *container.RestartPolicy == api.ContainerRestartPolicyAlways {
+			// and add them to the resulting cumulative container requests
+			addResourceList(reqs, containerReqs)
+
+			// track our cumulative restartable init container resources
+			addResourceList(restartableInitCotnainerReqs, containerReqs)
+			containerReqs = restartableInitCotnainerReqs
+		} else {
+			tmp := api.ResourceList{}
+			addResourceList(tmp, containerReqs)
+			addResourceList(tmp, restartableInitCotnainerReqs)
+			containerReqs = tmp
+		}
+
+		maxResourceList(initContainerReqs, containerReqs)
+	}
+
+	maxResourceList(reqs, initContainerReqs)
+
+	// If PodLevelResources feature is enabled and resources are set at pod-level,
+	// override aggregated container requests of resources supported by pod-level
+	// resources with quantities specified at pod-level.
+	if opts.PodLevelResourcesEnabled && pod.Spec.Resources != nil {
+		for resourceName, quantity := range pod.Spec.Resources.Requests {
+			if isSupportedPodLevelResource(resourceName) {
+				// override with pod-level resource requests
+				reqs[resourceName] = quantity
+			}
+		}
+	}
+
+	return reqs
+}
+
+// podLimits is a simplified version of pkg/api/v1/resource/PodLimits that operates against the core version of
+// pod. Any changes to that calculation should be reflected here.
+// NOTE: We do not want to check status resources here, only the spec. This is equivalent to setting
+// UseStatusResources=false in the common helper.
+// TODO: Maybe we can consider doing a partial conversion of the pod to a v1
+// type and then using the pkg/api/v1/resource/PodLimits.
+// TODO(ndixita): PodLimits method exists in
+// staging/src/k8s.io/component-helpers/resource/helpers.go. Refactor the code to
+// avoid duplicating podLimits method.
+func podLimits(pod *api.Pod, opts podResourcesOptions) api.ResourceList {
+	limits := api.ResourceList{}
+
+	for _, container := range pod.Spec.Containers {
+		addResourceList(limits, container.Resources.Limits)
+	}
+
+	restartableInitContainerLimits := api.ResourceList{}
+	initContainerLimits := api.ResourceList{}
+	// init containers define the minimum of any resource
+	for _, container := range pod.Spec.InitContainers {
+		containerLimits := container.Resources.Limits
+		// Is the init container marked as a sidecar?
+		if container.RestartPolicy != nil && *container.RestartPolicy == api.ContainerRestartPolicyAlways {
+			addResourceList(limits, containerLimits)
+
+			// track our cumulative restartable init container resources
+			addResourceList(restartableInitContainerLimits, containerLimits)
+			containerLimits = restartableInitContainerLimits
+		} else {
+			tmp := api.ResourceList{}
+			addResourceList(tmp, containerLimits)
+			addResourceList(tmp, restartableInitContainerLimits)
+			containerLimits = tmp
+		}
+		maxResourceList(initContainerLimits, containerLimits)
+	}
+
+	maxResourceList(limits, initContainerLimits)
+
+	// If PodLevelResources feature is enabled and resources are set at pod-level,
+	// override aggregated container limits of resources supported by pod-level
+	// resources with quantities specified at pod-level.
+	if opts.PodLevelResourcesEnabled && pod.Spec.Resources != nil {
+		for resourceName, quantity := range pod.Spec.Resources.Limits {
+			if isSupportedPodLevelResource(resourceName) {
+				// override with pod-level resource limits
+				limits[resourceName] = quantity
+			}
+		}
+	}
+
+	return limits
+}
+
+var supportedPodLevelResources = sets.New(api.ResourceCPU, api.ResourceMemory)
+
+// isSupportedPodLevelResources checks if a given resource is supported by pod-level
+// resource management through the PodLevelResources feature. Returns true if
+// the resource is supported.
+// isSupportedPodLevelResource method exists in
+// staging/src/k8s.io/component-helpers/resource/helpers.go.
+// isSupportedPodLevelResource is added here to avoid conversion of v1.
+// Pod to api.Pod.
+// TODO(ndixita): Find alternatives to avoid duplicating the code.
+func isSupportedPodLevelResource(name api.ResourceName) bool {
+	return supportedPodLevelResources.Has(name)
+}
+
+// addResourceList adds the resources in newList to list.
+func addResourceList(list, newList api.ResourceList) {
+	for name, quantity := range newList {
+		if value, ok := list[name]; !ok {
+			list[name] = quantity.DeepCopy()
+		} else {
+			value.Add(quantity)
+			list[name] = value
+		}
+	}
+}
+
+// maxResourceList sets list to the greater of list/newList for every resource in newList
+func maxResourceList(list, newList api.ResourceList) {
+	for name, quantity := range newList {
+		if value, ok := list[name]; !ok || quantity.Cmp(value) > 0 {
+			list[name] = quantity.DeepCopy()
+		}
+	}
 }

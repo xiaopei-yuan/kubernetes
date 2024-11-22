@@ -17,19 +17,16 @@ limitations under the License.
 package storageobjectinuseprotection
 
 import (
+	"context"
 	"reflect"
 	"testing"
-
-	"github.com/davecgh/go-spew/spew"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/apiserver/pkg/admission"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	api "k8s.io/kubernetes/pkg/apis/core"
-	"k8s.io/kubernetes/pkg/features"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
 )
 
@@ -63,7 +60,6 @@ func TestAdmit(t *testing.T) {
 		resource       schema.GroupVersionResource
 		object         runtime.Object
 		expectedObject runtime.Object
-		featureEnabled bool
 		namespace      string
 	}{
 		{
@@ -71,7 +67,6 @@ func TestAdmit(t *testing.T) {
 			api.SchemeGroupVersion.WithResource("persistentvolumeclaims"),
 			claim,
 			claimWithFinalizer,
-			true,
 			claim.Namespace,
 		},
 		{
@@ -79,23 +74,13 @@ func TestAdmit(t *testing.T) {
 			api.SchemeGroupVersion.WithResource("persistentvolumeclaims"),
 			claimWithFinalizer,
 			claimWithFinalizer,
-			true,
 			claimWithFinalizer.Namespace,
-		},
-		{
-			"disabled feature -> no finalizer",
-			api.SchemeGroupVersion.WithResource("persistentvolumeclaims"),
-			claim,
-			claim,
-			false,
-			claim.Namespace,
 		},
 		{
 			"create -> add finalizer",
 			api.SchemeGroupVersion.WithResource("persistentvolumes"),
 			pv,
 			pvWithFinalizer,
-			true,
 			pv.Namespace,
 		},
 		{
@@ -103,24 +88,14 @@ func TestAdmit(t *testing.T) {
 			api.SchemeGroupVersion.WithResource("persistentvolumes"),
 			pvWithFinalizer,
 			pvWithFinalizer,
-			true,
 			pvWithFinalizer.Namespace,
-		},
-		{
-			"disabled feature -> no finalizer",
-			api.SchemeGroupVersion.WithResource("persistentvolumes"),
-			pv,
-			pv,
-			false,
-			pv.Namespace,
 		},
 	}
 
-	ctrl := newPlugin()
-
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.StorageObjectInUseProtection, test.featureEnabled)()
+			ctrl := newPlugin()
+
 			obj := test.object.DeepCopyObject()
 			attrs := admission.NewAttributesRecord(
 				obj,                  // new object
@@ -136,12 +111,12 @@ func TestAdmit(t *testing.T) {
 				nil,   // userInfo
 			)
 
-			err := ctrl.Admit(attrs, nil)
+			err := ctrl.Admit(context.TODO(), attrs, nil)
 			if err != nil {
 				t.Errorf("Test %q: got unexpected error: %v", test.name, err)
 			}
 			if !reflect.DeepEqual(test.expectedObject, obj) {
-				t.Errorf("Test %q: Expected object:\n%s\ngot:\n%s", test.name, spew.Sdump(test.expectedObject), spew.Sdump(obj))
+				t.Errorf("Test %q: Expected object:\n%s\ngot:\n%s", test.name, dump.Pretty(test.expectedObject), dump.Pretty(obj))
 			}
 		})
 	}

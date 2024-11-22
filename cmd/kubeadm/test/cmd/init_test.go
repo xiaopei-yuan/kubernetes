@@ -17,31 +17,36 @@ limitations under the License.
 package kubeadm
 
 import (
-	"os/exec"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/lithammer/dedent"
-	"github.com/pkg/errors"
-	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
-	"k8s.io/kubernetes/cmd/kubeadm/app/phases/certs"
-	"k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
-	testutil "k8s.io/kubernetes/cmd/kubeadm/test"
+
+	"k8s.io/apimachinery/pkg/util/version"
 )
 
-func runKubeadmInit(args ...string) (string, string, error) {
+func runKubeadmInit(t testing.TB, args ...string) (string, string, int, error) {
+	t.Helper()
+	t.Setenv("KUBEADM_INIT_DRYRUN_DIR", os.TempDir())
 	kubeadmPath := getKubeadmPath()
 	kubeadmArgs := []string{"init", "--dry-run", "--ignore-preflight-errors=all"}
 	kubeadmArgs = append(kubeadmArgs, args...)
 	return RunCmd(kubeadmPath, kubeadmArgs...)
 }
 
-func TestCmdInitToken(t *testing.T) {
-	if *kubeadmCmdSkip {
-		t.Log("kubeadm cmd tests being skipped")
-		t.Skip()
+func getKubeadmVersion() *version.Version {
+	kubeadmPath := getKubeadmPath()
+	kubeadmArgs := []string{"version", "-o=short"}
+	out, _, _, err := RunCmd(kubeadmPath, kubeadmArgs...)
+	if err != nil {
+		panic(fmt.Sprintf("could not run 'kubeadm version -o=short': %v", err))
 	}
+	return version.MustParseSemantic(strings.TrimSpace(out))
+}
 
+func TestCmdInitToken(t *testing.T) {
 	initTest := []struct {
 		name     string
 		args     string
@@ -66,7 +71,7 @@ func TestCmdInitToken(t *testing.T) {
 
 	for _, rt := range initTest {
 		t.Run(rt.name, func(t *testing.T) {
-			_, _, err := runKubeadmInit(rt.args)
+			_, _, _, err := runKubeadmInit(t, rt.args)
 			if (err == nil) != rt.expected {
 				t.Fatalf(dedent.Dedent(`
 					CmdInitToken test case %q failed with an error: %v
@@ -86,11 +91,6 @@ func TestCmdInitToken(t *testing.T) {
 }
 
 func TestCmdInitKubernetesVersion(t *testing.T) {
-	if *kubeadmCmdSkip {
-		t.Log("kubeadm cmd tests being skipped")
-		t.Skip()
-	}
-
 	initTest := []struct {
 		name     string
 		args     string
@@ -103,14 +103,14 @@ func TestCmdInitKubernetesVersion(t *testing.T) {
 		},
 		{
 			name:     "valid version is accepted",
-			args:     "--kubernetes-version=" + constants.CurrentKubernetesVersion.String(),
+			args:     "--kubernetes-version=" + getKubeadmVersion().String(),
 			expected: true,
 		},
 	}
 
 	for _, rt := range initTest {
 		t.Run(rt.name, func(t *testing.T) {
-			_, _, err := runKubeadmInit(rt.args)
+			_, _, _, err := runKubeadmInit(t, rt.args)
 			if (err == nil) != rt.expected {
 				t.Fatalf(dedent.Dedent(`
 					CmdInitKubernetesVersion test case %q failed with an error: %v
@@ -130,11 +130,6 @@ func TestCmdInitKubernetesVersion(t *testing.T) {
 }
 
 func TestCmdInitConfig(t *testing.T) {
-	if *kubeadmCmdSkip {
-		t.Log("kubeadm cmd tests being skipped")
-		t.Skip()
-	}
-
 	initTest := []struct {
 		name     string
 		args     string
@@ -146,45 +141,45 @@ func TestCmdInitConfig(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "can't load old v1alpha1 config",
-			args:     "--config=testdata/init/v1alpha1.yaml",
-			expected: false,
-		},
-		{
-			name:     "can't load old v1alpha2 config",
-			args:     "--config=testdata/init/v1alpha2.yaml",
-			expected: false,
-		},
-		{
-			name:     "can't load old v1alpha3 config",
-			args:     "--config=testdata/init/v1alpha3.yaml",
-			expected: false,
-		},
-		{
-			name:     "can load v1beta1 config",
+			name:     "can't load v1beta1 config",
 			args:     "--config=testdata/init/v1beta1.yaml",
-			expected: true,
-		},
-		{
-			name:     "don't allow mixed arguments v1beta1",
-			args:     "--kubernetes-version=1.11.0 --config=testdata/init/v1beta1.yaml",
 			expected: false,
 		},
 		{
-			name:     "can load v1beta2 config",
+			name:     "can't load v1beta2 config",
 			args:     "--config=testdata/init/v1beta2.yaml",
+			expected: false,
+		},
+		{
+			name:     "can load v1beta3 config",
+			args:     "--config=testdata/init/v1beta3.yaml",
 			expected: true,
 		},
 		{
-			name:     "don't allow mixed arguments v1beta2",
-			args:     "--kubernetes-version=1.11.0 --config=testdata/init/v1beta2.yaml",
+			name:     "can load v1beta4 config",
+			args:     "--config=testdata/init/v1beta4.yaml",
+			expected: true,
+		},
+		{
+			name:     "don't allow mixed arguments v1beta3",
+			args:     "--kubernetes-version=1.11.0 --config=testdata/init/v1beta3.yaml",
+			expected: false,
+		},
+		{
+			name:     "can load current component config",
+			args:     "--config=testdata/init/current-component-config.yaml",
+			expected: true,
+		},
+		{
+			name:     "can't load old component config",
+			args:     "--config=testdata/init/old-component-config.yaml",
 			expected: false,
 		},
 	}
 
 	for _, rt := range initTest {
 		t.Run(rt.name, func(t *testing.T) {
-			_, _, err := runKubeadmInit(rt.args)
+			_, _, _, err := runKubeadmInit(t, rt.args)
 			if (err == nil) != rt.expected {
 				t.Fatalf(dedent.Dedent(`
 						CmdInitConfig test case %q failed with an error: %v
@@ -203,77 +198,7 @@ func TestCmdInitConfig(t *testing.T) {
 	}
 }
 
-func TestCmdInitCertPhaseCSR(t *testing.T) {
-	if *kubeadmCmdSkip {
-		t.Log("kubeadm cmd tests being skipped")
-		t.Skip()
-	}
-
-	tests := []struct {
-		name          string
-		baseName      string
-		expectedError string
-	}{
-		{
-			name:     "generate CSR",
-			baseName: certs.KubeadmCertKubeletClient.BaseName,
-		},
-		{
-			name:          "fails on CSR",
-			baseName:      certs.KubeadmCertRootCA.BaseName,
-			expectedError: "unknown flag: --csr-only",
-		},
-		{
-			name:          "fails on all",
-			baseName:      "all",
-			expectedError: "unknown flag: --csr-only",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			csrDir := testutil.SetupTempDir(t)
-			cert := &certs.KubeadmCertKubeletClient
-			kubeadmPath := getKubeadmPath()
-			_, stderr, err := RunCmd(kubeadmPath,
-				"init",
-				"phase",
-				"certs",
-				test.baseName,
-				"--csr-only",
-				"--csr-dir="+csrDir,
-			)
-
-			if test.expectedError != "" {
-				cause := errors.Cause(err)
-				_, ok := cause.(*exec.ExitError)
-				if !ok {
-					t.Fatalf("expected exitErr: got %T (%v)", cause, err)
-				}
-
-				if !strings.Contains(stderr, test.expectedError) {
-					t.Errorf("expected %q to contain %q", stderr, test.expectedError)
-				}
-				return
-			}
-
-			if err != nil {
-				t.Fatalf("couldn't run kubeadm: %v", err)
-			}
-
-			if _, _, err := pkiutil.TryLoadCSRAndKeyFromDisk(csrDir, cert.BaseName); err != nil {
-				t.Fatalf("couldn't load certificate %q: %v", cert.BaseName, err)
-			}
-		})
-	}
-}
-
 func TestCmdInitAPIPort(t *testing.T) {
-	if *kubeadmCmdSkip {
-		t.Log("kubeadm cmd tests being skipped")
-		t.Skip()
-	}
-
 	initTest := []struct {
 		name     string
 		args     string
@@ -303,7 +228,7 @@ func TestCmdInitAPIPort(t *testing.T) {
 
 	for _, rt := range initTest {
 		t.Run(rt.name, func(t *testing.T) {
-			_, _, err := runKubeadmInit(rt.args)
+			_, _, _, err := runKubeadmInit(t, rt.args)
 			if (err == nil) != rt.expected {
 				t.Fatalf(dedent.Dedent(`
 							CmdInitAPIPort test case %q failed with an error: %v
@@ -316,6 +241,46 @@ func TestCmdInitAPIPort(t *testing.T) {
 					rt.args,
 					rt.expected,
 					(err == nil),
+				)
+			}
+		})
+	}
+}
+
+// TestCmdInitFeatureGates test that feature gates won't make kubeadm panic.
+// When go panics it will exit with a 2 code. While we don't expect the init
+// calls to succeed in these tests, we ensure that the exit code of calling
+// kubeadm with different feature gates is not 2.
+func TestCmdInitFeatureGates(t *testing.T) {
+	const PanicExitcode = 2
+
+	initTest := []struct {
+		name string
+		args string
+	}{
+		{
+			name: "no feature gates passed",
+			args: "",
+		},
+		{
+			name: "feature gate PublicKeysECDSA=true",
+			args: "--feature-gates=PublicKeysECDSA=true",
+		},
+	}
+
+	for _, rt := range initTest {
+		t.Run(rt.name, func(t *testing.T) {
+			_, _, exitcode, err := runKubeadmInit(t, rt.args)
+			if exitcode == PanicExitcode {
+				t.Fatalf(dedent.Dedent(`
+							CmdInitFeatureGates test case %q failed with an error: %v
+							command 'kubeadm init %s'
+                got exit code: %t (panic); unexpected
+							`),
+					rt.name,
+					err,
+					rt.args,
+					PanicExitcode,
 				)
 			}
 		})

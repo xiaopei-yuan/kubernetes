@@ -34,11 +34,13 @@ type REST struct {
 }
 
 // NewREST returns a RESTStorage object that will work with ConfigMap objects.
-func NewREST(optsGetter generic.RESTOptionsGetter) *REST {
+func NewREST(optsGetter generic.RESTOptionsGetter) (*REST, error) {
 	store := &genericregistry.Store{
-		NewFunc:                  func() runtime.Object { return &api.ConfigMap{} },
-		NewListFunc:              func() runtime.Object { return &api.ConfigMapList{} },
-		DefaultQualifiedResource: api.Resource("configmaps"),
+		NewFunc:                   func() runtime.Object { return &api.ConfigMap{} },
+		NewListFunc:               func() runtime.Object { return &api.ConfigMapList{} },
+		PredicateFunc:             configmap.Matcher,
+		DefaultQualifiedResource:  api.Resource("configmaps"),
+		SingularQualifiedResource: api.Resource("configmap"),
 
 		CreateStrategy: configmap.Strategy,
 		UpdateStrategy: configmap.Strategy,
@@ -46,11 +48,14 @@ func NewREST(optsGetter generic.RESTOptionsGetter) *REST {
 
 		TableConvertor: printerstorage.TableConvertor{TableGenerator: printers.NewTableGenerator().With(printersinternal.AddHandlers)},
 	}
-	options := &generic.StoreOptions{RESTOptions: optsGetter}
-	if err := store.CompleteWithOptions(options); err != nil {
-		panic(err) // TODO: Propagate error up
+	options := &generic.StoreOptions{
+		RESTOptions: optsGetter,
+		AttrFunc:    configmap.GetAttrs,
 	}
-	return &REST{store}
+	if err := store.CompleteWithOptions(options); err != nil {
+		return nil, err
+	}
+	return &REST{store}, nil
 }
 
 // Implement ShortNamesProvider

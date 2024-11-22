@@ -26,9 +26,32 @@ run_kubectl_exec_pod_tests() {
   kube::log::status "Testing kubectl exec POD COMMAND"
 
   ### Test execute non-existing POD
-  output_message=$(! kubectl exec abc date 2>&1)
+  output_message=$(! kubectl exec abc 2>&1 -- date)
   # POD abc should error since it doesn't exist
   kube::test::if_has_string "${output_message}" 'pods "abc" not found'
+
+  ### Test execute multiple resources
+  output_message=$(! kubectl exec -f - 2>&1 -- echo test << __EOF__
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test2
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+__EOF__
+)
+  kube::test::if_has_string "${output_message}" 'cannot exec into multiple objects at a time'
 
   ### Test execute existing POD
   # Create test-pod
@@ -81,14 +104,14 @@ run_kubectl_exec_resource_name_tests() {
   # POD test-pod is exists this is shouldn't have output not found
   kube::test::if_has_not_string "${output_message}" 'not found'
   # These must be pass the validate
-  kube::test::if_has_not_string "${output_message}" 'pod or type/name must be specified'
-  
+  kube::test::if_has_not_string "${output_message}" 'pod, type/name or --filename must be specified'
+
   output_message=$(! kubectl exec replicaset/frontend date 2>&1)
   # Replicaset frontend is valid and exists will select the first pod.
   # and Shouldn't have output not found
   kube::test::if_has_not_string "${output_message}" 'not found'
   # These must be pass the validate
-  kube::test::if_has_not_string "${output_message}" 'pod or type/name must be specified'
+  kube::test::if_has_not_string "${output_message}" 'pod, type/name or --filename must be specified'
 
   # Clean up
   kubectl delete pods/test-pod

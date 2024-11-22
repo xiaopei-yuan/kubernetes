@@ -17,6 +17,8 @@ limitations under the License.
 package httpstream
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"testing"
@@ -52,19 +54,25 @@ func TestHandshake(t *testing.T) {
 		expectedProtocol string
 		expectError      bool
 	}{
-		"no client protocols": {
-			clientProtocols:  []string{},
-			serverProtocols:  []string{"a", "b"},
-			expectedProtocol: "",
-		},
 		"no common protocol": {
 			clientProtocols:  []string{"c"},
 			serverProtocols:  []string{"a", "b"},
 			expectedProtocol: "",
 			expectError:      true,
 		},
+		"no common protocol with comma separated list": {
+			clientProtocols:  []string{"c, d"},
+			serverProtocols:  []string{"a", "b"},
+			expectedProtocol: "",
+			expectError:      true,
+		},
 		"common protocol": {
 			clientProtocols:  []string{"b"},
+			serverProtocols:  []string{"a", "b"},
+			expectedProtocol: "b",
+		},
+		"common protocol with comma separated list": {
+			clientProtocols:  []string{"b, c"},
 			serverProtocols:  []string{"a", "b"},
 			expectedProtocol: "b",
 		},
@@ -121,5 +129,71 @@ func TestHandshake(t *testing.T) {
 		if e, a := []string{test.expectedProtocol}, w.Header()[HeaderProtocolVersion]; !reflect.DeepEqual(e, a) {
 			t.Errorf("%s: protocol response header: expected %v, got %v", name, e, a)
 		}
+	}
+}
+
+func TestIsUpgradeFailureError(t *testing.T) {
+	testCases := map[string]struct {
+		err      error
+		expected bool
+	}{
+		"nil error should return false": {
+			err:      nil,
+			expected: false,
+		},
+		"Non-upgrade error should return false": {
+			err:      fmt.Errorf("this is not an upgrade error"),
+			expected: false,
+		},
+		"UpgradeFailure error should return true": {
+			err:      &UpgradeFailureError{},
+			expected: true,
+		},
+		"Wrapped Non-UpgradeFailure error should return false": {
+			err:      fmt.Errorf("%s: %w", "first error", errors.New("Non-upgrade error")),
+			expected: false,
+		},
+		"Wrapped UpgradeFailure error should return true": {
+			err:      fmt.Errorf("%s: %w", "first error", &UpgradeFailureError{}),
+			expected: true,
+		},
+	}
+
+	for name, test := range testCases {
+		t.Run(name, func(t *testing.T) {
+			actual := IsUpgradeFailure(test.err)
+			if test.expected != actual {
+				t.Errorf("expected upgrade failure %t, got %t", test.expected, actual)
+			}
+		})
+	}
+}
+
+func TestIsHTTPSProxyError(t *testing.T) {
+	testCases := map[string]struct {
+		err      error
+		expected bool
+	}{
+		"nil error should return false": {
+			err:      nil,
+			expected: false,
+		},
+		"Not HTTPS proxy error should return false": {
+			err:      errors.New("this is not an upgrade error"),
+			expected: false,
+		},
+		"HTTPS proxy error should return true": {
+			err:      errors.New("proxy: unknown scheme: https"),
+			expected: true,
+		},
+	}
+
+	for name, test := range testCases {
+		t.Run(name, func(t *testing.T) {
+			actual := IsHTTPSProxyError(test.err)
+			if test.expected != actual {
+				t.Errorf("expected HTTPS proxy error %t, got %t", test.expected, actual)
+			}
+		})
 	}
 }

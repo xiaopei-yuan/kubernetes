@@ -23,6 +23,7 @@ import (
 	"time"
 
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 )
 
 type runtimeState struct {
@@ -30,9 +31,12 @@ type runtimeState struct {
 	lastBaseRuntimeSync      time.Time
 	baseRuntimeSyncThreshold time.Duration
 	networkError             error
+	runtimeError             error
 	storageError             error
 	cidr                     string
 	healthChecks             []*healthCheck
+	rtHandlers               []kubecontainer.RuntimeHandler
+	rtFeatures               *kubecontainer.RuntimeFeatures
 }
 
 // A health check function should be efficient and not rely on external
@@ -60,6 +64,36 @@ func (s *runtimeState) setNetworkState(err error) {
 	s.Lock()
 	defer s.Unlock()
 	s.networkError = err
+}
+
+func (s *runtimeState) setRuntimeState(err error) {
+	s.Lock()
+	defer s.Unlock()
+	s.runtimeError = err
+}
+
+func (s *runtimeState) setRuntimeHandlers(rtHandlers []kubecontainer.RuntimeHandler) {
+	s.Lock()
+	defer s.Unlock()
+	s.rtHandlers = rtHandlers
+}
+
+func (s *runtimeState) runtimeHandlers() []kubecontainer.RuntimeHandler {
+	s.RLock()
+	defer s.RUnlock()
+	return s.rtHandlers
+}
+
+func (s *runtimeState) setRuntimeFeatures(features *kubecontainer.RuntimeFeatures) {
+	s.Lock()
+	defer s.Unlock()
+	s.rtFeatures = features
+}
+
+func (s *runtimeState) runtimeFeatures() *kubecontainer.RuntimeFeatures {
+	s.RLock()
+	defer s.RUnlock()
+	return s.rtFeatures
 }
 
 func (s *runtimeState) setStorageState(err error) {
@@ -94,6 +128,9 @@ func (s *runtimeState) runtimeErrors() error {
 			errs = append(errs, fmt.Errorf("%s is not healthy: %v", hc.name, err))
 		}
 	}
+	if s.runtimeError != nil {
+		errs = append(errs, s.runtimeError)
+	}
 
 	return utilerrors.NewAggregate(errs)
 }
@@ -118,9 +155,7 @@ func (s *runtimeState) storageErrors() error {
 	return utilerrors.NewAggregate(errs)
 }
 
-func newRuntimeState(
-	runtimeSyncThreshold time.Duration,
-) *runtimeState {
+func newRuntimeState(runtimeSyncThreshold time.Duration) *runtimeState {
 	return &runtimeState{
 		lastBaseRuntimeSync:      time.Time{},
 		baseRuntimeSyncThreshold: runtimeSyncThreshold,

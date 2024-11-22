@@ -17,25 +17,31 @@ limitations under the License.
 package metrics
 
 import (
-	"github.com/blang/semver"
-	"github.com/prometheus/client_golang/prometheus"
-	apimachineryversion "k8s.io/apimachinery/pkg/version"
+	"context"
 	"testing"
+
+	"github.com/blang/semver/v4"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
+
+	apimachineryversion "k8s.io/apimachinery/pkg/version"
 )
 
 func TestHistogram(t *testing.T) {
 	v115 := semver.MustParse("1.15.0")
-	v114 := semver.MustParse("1.14.0")
 	var tests = []struct {
 		desc string
-		HistogramOpts
+		*HistogramOpts
 		registryVersion     *semver.Version
 		expectedMetricCount int
 		expectedHelp        string
 	}{
 		{
 			desc: "Test non deprecated",
-			HistogramOpts: HistogramOpts{
+			HistogramOpts: &HistogramOpts{
 				Namespace: "namespace",
 				Name:      "metric_test_name",
 				Subsystem: "subsystem",
@@ -48,12 +54,12 @@ func TestHistogram(t *testing.T) {
 		},
 		{
 			desc: "Test deprecated",
-			HistogramOpts: HistogramOpts{
+			HistogramOpts: &HistogramOpts{
 				Namespace:         "namespace",
 				Name:              "metric_test_name",
 				Subsystem:         "subsystem",
 				Help:              "histogram help message",
-				DeprecatedVersion: &v115,
+				DeprecatedVersion: "1.15.0",
 				Buckets:           prometheus.DefBuckets,
 			},
 			registryVersion:     &v115,
@@ -62,12 +68,12 @@ func TestHistogram(t *testing.T) {
 		},
 		{
 			desc: "Test hidden",
-			HistogramOpts: HistogramOpts{
+			HistogramOpts: &HistogramOpts{
 				Namespace:         "namespace",
 				Name:              "metric_test_name",
 				Subsystem:         "subsystem",
 				Help:              "histogram help message",
-				DeprecatedVersion: &v114,
+				DeprecatedVersion: "1.14.0",
 				Buckets:           prometheus.DefBuckets,
 			},
 			registryVersion:     &v115,
@@ -78,25 +84,33 @@ func TestHistogram(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
-			registry := NewKubeRegistry(apimachineryversion.Info{
+			registry := newKubeRegistry(apimachineryversion.Info{
 				Major:      "1",
 				Minor:      "15",
 				GitVersion: "v1.15.0-alpha-1.12345",
 			})
-			c := NewHistogram(&test.HistogramOpts)
+			c := NewHistogram(test.HistogramOpts)
 			registry.MustRegister(c)
+			cm := c.ObserverMetric.(prometheus.Metric)
+
+			metricChan := make(chan prometheus.Metric, 2)
+			c.Collect(metricChan)
+			close(metricChan)
+			m1 := <-metricChan
+			if m1 != cm {
+				t.Error("Unexpected metric", m1, cm)
+			}
+			m2, ok := <-metricChan
+			if ok {
+				t.Error("Unexpected second metric", m2)
+			}
 
 			ms, err := registry.Gather()
-			if len(ms) != test.expectedMetricCount {
-				t.Errorf("Got %v metrics, Want: %v metrics", len(ms), test.expectedMetricCount)
-			}
-			if err != nil {
-				t.Fatalf("Gather failed %v", err)
-			}
+			assert.Lenf(t, ms, test.expectedMetricCount, "Got %v metrics, Want: %v metrics", len(ms), test.expectedMetricCount)
+			require.NoError(t, err, "Gather failed %v", err)
+
 			for _, metric := range ms {
-				if metric.GetHelp() != test.expectedHelp {
-					t.Errorf("Got %s as help message, want %s", metric.GetHelp(), test.expectedHelp)
-				}
+				assert.Equalf(t, test.expectedHelp, metric.GetHelp(), "Got %s as help message, want %s", metric.GetHelp(), test.expectedHelp)
 			}
 
 			// let's increment the counter and verify that the metric still works
@@ -106,14 +120,11 @@ func TestHistogram(t *testing.T) {
 			c.Observe(1.5)
 			expected := 4
 			ms, err = registry.Gather()
-			if err != nil {
-				t.Fatalf("Gather failed %v", err)
-			}
+			require.NoError(t, err, "Gather failed %v", err)
+
 			for _, mf := range ms {
 				for _, m := range mf.GetMetric() {
-					if int(m.GetHistogram().GetSampleCount()) != expected {
-						t.Errorf("Got %v, want %v as the sample count", m.GetHistogram().GetSampleCount(), expected)
-					}
+					assert.Equalf(t, expected, int(m.GetHistogram().GetSampleCount()), "Got %v, want %v as the sample count", m.GetHistogram().GetSampleCount(), expected)
 				}
 			}
 		})
@@ -122,10 +133,9 @@ func TestHistogram(t *testing.T) {
 
 func TestHistogramVec(t *testing.T) {
 	v115 := semver.MustParse("1.15.0")
-	v114 := semver.MustParse("1.14.0")
 	var tests = []struct {
 		desc string
-		HistogramOpts
+		*HistogramOpts
 		labels              []string
 		registryVersion     *semver.Version
 		expectedMetricCount int
@@ -133,7 +143,7 @@ func TestHistogramVec(t *testing.T) {
 	}{
 		{
 			desc: "Test non deprecated",
-			HistogramOpts: HistogramOpts{
+			HistogramOpts: &HistogramOpts{
 				Namespace: "namespace",
 				Name:      "metric_test_name",
 				Subsystem: "subsystem",
@@ -147,12 +157,12 @@ func TestHistogramVec(t *testing.T) {
 		},
 		{
 			desc: "Test deprecated",
-			HistogramOpts: HistogramOpts{
+			HistogramOpts: &HistogramOpts{
 				Namespace:         "namespace",
 				Name:              "metric_test_name",
 				Subsystem:         "subsystem",
 				Help:              "histogram help message",
-				DeprecatedVersion: &v115,
+				DeprecatedVersion: "1.15.0",
 				Buckets:           prometheus.DefBuckets,
 			},
 			labels:              []string{"label_a", "label_b"},
@@ -162,12 +172,12 @@ func TestHistogramVec(t *testing.T) {
 		},
 		{
 			desc: "Test hidden",
-			HistogramOpts: HistogramOpts{
+			HistogramOpts: &HistogramOpts{
 				Namespace:         "namespace",
 				Name:              "metric_test_name",
 				Subsystem:         "subsystem",
 				Help:              "histogram help message",
-				DeprecatedVersion: &v114,
+				DeprecatedVersion: "1.14.0",
 				Buckets:           prometheus.DefBuckets,
 			},
 			labels:              []string{"label_a", "label_b"},
@@ -179,25 +189,37 @@ func TestHistogramVec(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
-			registry := NewKubeRegistry(apimachineryversion.Info{
+			registry := newKubeRegistry(apimachineryversion.Info{
 				Major:      "1",
 				Minor:      "15",
 				GitVersion: "v1.15.0-alpha-1.12345",
 			})
-			c := NewHistogramVec(&test.HistogramOpts, test.labels)
+			c := NewHistogramVec(test.HistogramOpts, test.labels)
 			registry.MustRegister(c)
-			c.WithLabelValues("1", "2").Observe(1.0)
-			ms, err := registry.Gather()
+			ov12 := c.WithLabelValues("1", "2")
+			cm1 := ov12.(prometheus.Metric)
+			ov12.Observe(1.0)
 
-			if len(ms) != test.expectedMetricCount {
-				t.Errorf("Got %v metrics, Want: %v metrics", len(ms), test.expectedMetricCount)
+			if test.expectedMetricCount > 0 {
+				metricChan := make(chan prometheus.Metric, 2)
+				c.Collect(metricChan)
+				close(metricChan)
+				m1 := <-metricChan
+				if m1 != cm1 {
+					t.Error("Unexpected metric", m1, cm1)
+				}
+				m2, ok := <-metricChan
+				if ok {
+					t.Error("Unexpected second metric", m2)
+				}
 			}
-			if err != nil {
-				t.Fatalf("Gather failed %v", err)
-			}
+
+			ms, err := registry.Gather()
+			assert.Lenf(t, ms, test.expectedMetricCount, "Got %v metrics, Want: %v metrics", len(ms), test.expectedMetricCount)
+			require.NoError(t, err, "Gather failed %v", err)
 			for _, metric := range ms {
 				if metric.GetHelp() != test.expectedHelp {
-					t.Errorf("Got %s as help message, want %s", metric.GetHelp(), test.expectedHelp)
+					assert.Equalf(t, test.expectedHelp, metric.GetHelp(), "Got %s as help message, want %s", metric.GetHelp(), test.expectedHelp)
 				}
 			}
 
@@ -205,21 +227,268 @@ func TestHistogramVec(t *testing.T) {
 			c.WithLabelValues("1", "3").Observe(1.0)
 			c.WithLabelValues("2", "3").Observe(1.0)
 			ms, err = registry.Gather()
-			if err != nil {
-				t.Fatalf("Gather failed %v", err)
-			}
+			require.NoError(t, err, "Gather failed %v", err)
+
 			for _, mf := range ms {
-				if len(mf.GetMetric()) != 3 {
-					t.Errorf("Got %v metrics, wanted 2 as the count", len(mf.GetMetric()))
-				}
+				assert.Lenf(t, mf.GetMetric(), 3, "Got %v metrics, wanted 3 as the count", len(mf.GetMetric()))
 				for _, m := range mf.GetMetric() {
-					if m.GetHistogram().GetSampleCount() != 1 {
-						t.Errorf(
-							"Got %v metrics, expected histogram sample count to equal 1",
-							m.GetHistogram().GetSampleCount())
-					}
+					assert.Equalf(t, uint64(1), m.GetHistogram().GetSampleCount(), "Got %v metrics, expected histogram sample count to equal 1", m.GetHistogram().GetSampleCount())
 				}
 			}
 		})
+	}
+}
+
+func TestHistogramWithLabelValueAllowList(t *testing.T) {
+	labelAllowValues := map[string]string{
+		"namespace_subsystem_metric_allowlist_test,label_a": "allowed",
+	}
+	labels := []string{"label_a", "label_b"}
+	opts := &HistogramOpts{
+		Namespace: "namespace",
+		Name:      "metric_allowlist_test",
+		Subsystem: "subsystem",
+	}
+	var tests = []struct {
+		desc               string
+		labelValues        [][]string
+		expectMetricValues map[string]uint64
+	}{
+		{
+			desc:        "Test no unexpected input",
+			labelValues: [][]string{{"allowed", "b1"}, {"allowed", "b2"}},
+			expectMetricValues: map[string]uint64{
+				"allowed b1": 1.0,
+				"allowed b2": 1.0,
+			},
+		},
+		{
+			desc:        "Test unexpected input",
+			labelValues: [][]string{{"allowed", "b1"}, {"not_allowed", "b1"}},
+			expectMetricValues: map[string]uint64{
+				"allowed b1":    1.0,
+				"unexpected b1": 1.0,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.desc, func(t *testing.T) {
+			labelValueAllowLists = map[string]*MetricLabelAllowList{}
+			registry := newKubeRegistry(apimachineryversion.Info{
+				Major:      "1",
+				Minor:      "15",
+				GitVersion: "v1.15.0-alpha-1.12345",
+			})
+			c := NewHistogramVec(opts, labels)
+			registry.MustRegister(c)
+			SetLabelAllowListFromCLI(labelAllowValues)
+
+			for _, lv := range test.labelValues {
+				c.WithLabelValues(lv...).Observe(1.0)
+			}
+			mfs, err := registry.Gather()
+			require.NoError(t, err, "Gather failed %v", err)
+
+			for _, mf := range mfs {
+				if *mf.Name != BuildFQName(opts.Namespace, opts.Subsystem, opts.Name) {
+					continue
+				}
+				mfMetric := mf.GetMetric()
+
+				for _, m := range mfMetric {
+					var aValue, bValue string
+					for _, l := range m.Label {
+						if *l.Name == "label_a" {
+							aValue = *l.Value
+						}
+						if *l.Name == "label_b" {
+							bValue = *l.Value
+						}
+					}
+					labelValuePair := aValue + " " + bValue
+					expectedValue, ok := test.expectMetricValues[labelValuePair]
+					assert.True(t, ok, "Got unexpected label values, lable_a is %v, label_b is %v", aValue, bValue)
+					actualValue := m.GetHistogram().GetSampleCount()
+					assert.Equalf(t, expectedValue, actualValue, "Got %v, wanted %v as the count while setting label_a to %v and label b to %v", actualValue, expectedValue, aValue, bValue)
+				}
+			}
+		})
+	}
+}
+
+func TestHistogramWithExemplar(t *testing.T) {
+	// Arrange.
+	traceID := trace.TraceID([]byte("trace-0000-xxxxx"))
+	spanID := trace.SpanID([]byte("span-0000-xxxxx"))
+	ctxForSpanCtx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+	}))
+	value := float64(10)
+
+	histogram := NewHistogram(&HistogramOpts{
+		Name:    "histogram_exemplar_test",
+		Help:    "helpless",
+		Buckets: []float64{100},
+	})
+	_ = histogram.WithContext(ctxForSpanCtx)
+
+	registry := newKubeRegistry(apimachineryversion.Info{
+		Major:      "1",
+		Minor:      "15",
+		GitVersion: "v1.15.0-alpha-1.12345",
+	})
+	registry.MustRegister(histogram)
+
+	// Act.
+	histogram.Observe(value)
+
+	// Assert.
+	mfs, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("Gather failed %v", err)
+	}
+
+	if len(mfs) != 1 {
+		t.Fatalf("Got %v metric families, Want: 1 metric family", len(mfs))
+	}
+
+	mf := mfs[0]
+	var m *dto.Metric
+	switch mf.GetType() {
+	case dto.MetricType_HISTOGRAM:
+		m = mfs[0].GetMetric()[0]
+	default:
+		t.Fatalf("Got %v metric type, Want: %v metric type", mf.GetType(), dto.MetricType_COUNTER)
+	}
+
+	want := value
+	got := m.GetHistogram().GetSampleSum()
+	if got != want {
+		t.Fatalf("Got %f, wanted %f as the count", got, want)
+	}
+
+	buckets := m.GetHistogram().GetBucket()
+	if len(buckets) == 0 {
+		t.Fatalf("Got 0 buckets, wanted 1")
+	}
+
+	e := buckets[0].GetExemplar()
+	if e == nil {
+		t.Fatalf("Got nil exemplar, wanted an exemplar")
+	}
+
+	eLabels := e.GetLabel()
+	if eLabels == nil {
+		t.Fatalf("Got nil exemplar label, wanted an exemplar label")
+	}
+
+	if len(eLabels) != 2 {
+		t.Fatalf("Got %v exemplar labels, wanted 2 exemplar labels", len(eLabels))
+	}
+
+	for _, l := range eLabels {
+		switch *l.Name {
+		case "trace_id":
+			if *l.Value != traceID.String() {
+				t.Fatalf("Got %s as traceID, wanted %s", *l.Value, traceID.String())
+			}
+		case "span_id":
+			if *l.Value != spanID.String() {
+				t.Fatalf("Got %s as spanID, wanted %s", *l.Value, spanID.String())
+			}
+		default:
+			t.Fatalf("Got unexpected label %s", *l.Name)
+		}
+	}
+}
+
+func TestHistogramVecWithExemplar(t *testing.T) {
+	// Arrange.
+	traceID := trace.TraceID([]byte("trace-0000-xxxxx"))
+	spanID := trace.SpanID([]byte("span-0000-xxxxx"))
+	ctxForSpanCtx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+	}))
+	value := float64(10)
+
+	histogramVec := NewHistogramVec(&HistogramOpts{
+		Name:    "histogram_exemplar_test",
+		Help:    "helpless",
+		Buckets: []float64{100},
+	}, []string{"group"})
+	h := histogramVec.WithContext(ctxForSpanCtx)
+
+	registry := newKubeRegistry(apimachineryversion.Info{
+		Major:      "1",
+		Minor:      "15",
+		GitVersion: "v1.15.0-alpha-1.12345",
+	})
+	registry.MustRegister(histogramVec)
+
+	// Act.
+	h.WithLabelValues("foo").Observe(value)
+
+	// Assert.
+	mfs, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("Gather failed %v", err)
+	}
+
+	if len(mfs) != 1 {
+		t.Fatalf("Got %v metric families, Want: 1 metric family", len(mfs))
+	}
+
+	mf := mfs[0]
+	var m *dto.Metric
+	switch mf.GetType() {
+	case dto.MetricType_HISTOGRAM:
+		m = mfs[0].GetMetric()[0]
+	default:
+		t.Fatalf("Got %v metric type, Want: %v metric type", mf.GetType(), dto.MetricType_COUNTER)
+	}
+
+	want := value
+	got := m.GetHistogram().GetSampleSum()
+	if got != want {
+		t.Fatalf("Got %f, wanted %f as the count", got, want)
+	}
+
+	buckets := m.GetHistogram().GetBucket()
+	if len(buckets) == 0 {
+		t.Fatalf("Got 0 buckets, wanted 1")
+	}
+
+	e := buckets[0].GetExemplar()
+	if e == nil {
+		t.Fatalf("Got nil exemplar, wanted an exemplar")
+	}
+
+	eLabels := e.GetLabel()
+	if eLabels == nil {
+		t.Fatalf("Got nil exemplar label, wanted an exemplar label")
+	}
+
+	if len(eLabels) != 2 {
+		t.Fatalf("Got %v exemplar labels, wanted 2 exemplar labels", len(eLabels))
+	}
+
+	for _, l := range eLabels {
+		switch *l.Name {
+		case "trace_id":
+			if *l.Value != traceID.String() {
+				t.Fatalf("Got %s as traceID, wanted %s", *l.Value, traceID.String())
+			}
+		case "span_id":
+			if *l.Value != spanID.String() {
+				t.Fatalf("Got %s as spanID, wanted %s", *l.Value, spanID.String())
+			}
+		default:
+			t.Fatalf("Got unexpected label %s", *l.Name)
+		}
 	}
 }

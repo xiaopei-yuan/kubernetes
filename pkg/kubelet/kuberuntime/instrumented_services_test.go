@@ -17,32 +17,40 @@ limitations under the License.
 package kuberuntime
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
+
+	compbasemetrics "k8s.io/component-base/metrics"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
 )
 
 func TestRecordOperation(t *testing.T) {
-	prometheus.MustRegister(metrics.RuntimeOperations)
-	prometheus.MustRegister(metrics.RuntimeOperationsDuration)
-	prometheus.MustRegister(metrics.RuntimeOperationsErrors)
+	// Use local registry
+	var registry = compbasemetrics.NewKubeRegistry()
+	var gather compbasemetrics.Gatherer = registry
 
-	temporalServer := "127.0.0.1:1234"
-	l, err := net.Listen("tcp", temporalServer)
+	registry.MustRegister(metrics.RuntimeOperations)
+	registry.MustRegister(metrics.RuntimeOperationsDuration)
+	registry.MustRegister(metrics.RuntimeOperationsErrors)
+
+	registry.Reset()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	assert.NoError(t, err)
 	defer l.Close()
 
-	prometheusURL := "http://" + temporalServer + "/metrics"
+	prometheusURL := "http://" + l.Addr().String() + "/metrics"
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", prometheus.Handler())
+	handler := compbasemetrics.HandlerFor(gather, compbasemetrics.HandlerOpts{})
+	mux.Handle("/metrics", handler)
 	server := &http.Server{
-		Addr:    temporalServer,
+		Addr:    l.Addr().String(),
 		Handler: mux,
 	}
 	go func() {
@@ -63,14 +71,16 @@ func TestRecordOperation(t *testing.T) {
 }
 
 func TestInstrumentedVersion(t *testing.T) {
+	ctx := context.Background()
 	fakeRuntime, _, _, _ := createTestRuntimeManager()
 	irs := newInstrumentedRuntimeService(fakeRuntime)
-	vr, err := irs.Version("1")
+	vr, err := irs.Version(ctx, "1")
 	assert.NoError(t, err)
 	assert.Equal(t, kubeRuntimeAPIVersion, vr.Version)
 }
 
 func TestStatus(t *testing.T) {
+	ctx := context.Background()
 	fakeRuntime, _, _, _ := createTestRuntimeManager()
 	fakeRuntime.FakeStatus = &runtimeapi.RuntimeStatus{
 		Conditions: []*runtimeapi.RuntimeCondition{
@@ -79,7 +89,7 @@ func TestStatus(t *testing.T) {
 		},
 	}
 	irs := newInstrumentedRuntimeService(fakeRuntime)
-	actural, err := irs.Status()
+	actural, err := irs.Status(ctx, false)
 	assert.NoError(t, err)
 	expected := &runtimeapi.RuntimeStatus{
 		Conditions: []*runtimeapi.RuntimeCondition{
@@ -87,5 +97,5 @@ func TestStatus(t *testing.T) {
 			{Type: runtimeapi.NetworkReady, Status: true},
 		},
 	}
-	assert.Equal(t, expected, actural)
+	assert.Equal(t, expected, actural.Status)
 }

@@ -1,15 +1,13 @@
 # See the OWNERS docs at https://go.k8s.io/owners
 
 approvers:
-- andrewsykim
-- cheftako
-- mcrute
-- d-nishi
+  - andrewsykim
+  - cheftako
 reviewers:
-- andrewsykim
-- cheftako
-- mcrute
-- d-nishi
-
+  - andrewsykim
+  - cheftako
+emeritus_approvers:
+  - d-nishi
+  - mcrute
 labels:
-- sig/cloud-provider
+  - sig/cloud-provider

@@ -19,15 +19,16 @@ limitations under the License.
 package v1
 
 import (
+	context "context"
 	time "time"
 
-	corev1 "k8s.io/api/core/v1"
+	apicorev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 	watch "k8s.io/apimachinery/pkg/watch"
 	internalinterfaces "k8s.io/client-go/informers/internalinterfaces"
 	kubernetes "k8s.io/client-go/kubernetes"
-	v1 "k8s.io/client-go/listers/core/v1"
+	corev1 "k8s.io/client-go/listers/core/v1"
 	cache "k8s.io/client-go/tools/cache"
 )
 
@@ -35,7 +36,7 @@ import (
 // PersistentVolumeClaims.
 type PersistentVolumeClaimInformer interface {
 	Informer() cache.SharedIndexInformer
-	Lister() v1.PersistentVolumeClaimLister
+	Lister() corev1.PersistentVolumeClaimLister
 }
 
 type persistentVolumeClaimInformer struct {
@@ -61,16 +62,16 @@ func NewFilteredPersistentVolumeClaimInformer(client kubernetes.Interface, names
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.CoreV1().PersistentVolumeClaims(namespace).List(options)
+				return client.CoreV1().PersistentVolumeClaims(namespace).List(context.TODO(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
 					tweakListOptions(&options)
 				}
-				return client.CoreV1().PersistentVolumeClaims(namespace).Watch(options)
+				return client.CoreV1().PersistentVolumeClaims(namespace).Watch(context.TODO(), options)
 			},
 		},
-		&corev1.PersistentVolumeClaim{},
+		&apicorev1.PersistentVolumeClaim{},
 		resyncPeriod,
 		indexers,
 	)
@@ -81,9 +82,9 @@ func (f *persistentVolumeClaimInformer) defaultInformer(client kubernetes.Interf
 }
 
 func (f *persistentVolumeClaimInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&corev1.PersistentVolumeClaim{}, f.defaultInformer)
+	return f.factory.InformerFor(&apicorev1.PersistentVolumeClaim{}, f.defaultInformer)
 }
 
-func (f *persistentVolumeClaimInformer) Lister() v1.PersistentVolumeClaimLister {
-	return v1.NewPersistentVolumeClaimLister(f.Informer().GetIndexer())
+func (f *persistentVolumeClaimInformer) Lister() corev1.PersistentVolumeClaimLister {
+	return corev1.NewPersistentVolumeClaimLister(f.Informer().GetIndexer())
 }

@@ -1,4 +1,4 @@
-// +build linux
+//go:build linux
 
 package configs
 
@@ -9,12 +9,14 @@ func (n *Namespace) Syscall() int {
 }
 
 var namespaceInfo = map[NamespaceType]int{
-	NEWNET:  unix.CLONE_NEWNET,
-	NEWNS:   unix.CLONE_NEWNS,
-	NEWUSER: unix.CLONE_NEWUSER,
-	NEWIPC:  unix.CLONE_NEWIPC,
-	NEWUTS:  unix.CLONE_NEWUTS,
-	NEWPID:  unix.CLONE_NEWPID,
+	NEWNET:    unix.CLONE_NEWNET,
+	NEWNS:     unix.CLONE_NEWNS,
+	NEWUSER:   unix.CLONE_NEWUSER,
+	NEWIPC:    unix.CLONE_NEWIPC,
+	NEWUTS:    unix.CLONE_NEWUTS,
+	NEWPID:    unix.CLONE_NEWPID,
+	NEWCGROUP: unix.CLONE_NEWCGROUP,
+	NEWTIME:   unix.CLONE_NEWTIME,
 }
 
 // CloneFlags parses the container's Namespaces options to set the correct
@@ -28,4 +30,16 @@ func (n *Namespaces) CloneFlags() uintptr {
 		flag |= namespaceInfo[v.Type]
 	}
 	return uintptr(flag)
+}
+
+// IsPrivate tells whether the namespace of type t is configured as private
+// (i.e. it exists and is not shared).
+func (n Namespaces) IsPrivate(t NamespaceType) bool {
+	for _, v := range n {
+		if v.Type == t {
+			return v.Path == ""
+		}
+	}
+	// Not found, so implicitly sharing a parent namespace.
+	return false
 }

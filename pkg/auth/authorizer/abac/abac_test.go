@@ -17,6 +17,7 @@ limitations under the License.
 package abac
 
 import (
+	"context"
 	"io/ioutil"
 	"os"
 	"reflect"
@@ -25,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
+	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/kubernetes/pkg/apis/abac"
 	"k8s.io/kubernetes/pkg/apis/abac/v0"
 	"k8s.io/kubernetes/pkg/apis/abac/v1beta1"
@@ -133,7 +135,7 @@ func TestAuthorizeV0(t *testing.T) {
 
 			ResourceRequest: len(tc.NS) > 0 || len(tc.Resource) > 0,
 		}
-		decision, _, _ := a.Authorize(attr)
+		decision, _, _ := a.Authorize(context.Background(), attr)
 		if tc.ExpectDecision != decision {
 			t.Logf("tc: %v -> attr %v", tc, attr)
 			t.Errorf("%d: Expected allowed=%v but actually allowed=%v\n\t%v",
@@ -323,7 +325,7 @@ func TestRulesFor(t *testing.T) {
 			User:      &tc.User,
 			Namespace: tc.Namespace,
 		}
-		resourceRules, nonResourceRules, _, _ := a.RulesFor(attr.GetUser(), attr.GetNamespace())
+		resourceRules, nonResourceRules, _, _ := a.RulesFor(genericapirequest.NewContext(), attr.GetUser(), attr.GetNamespace())
 		actualResourceRules := getResourceRules(resourceRules)
 		if !reflect.DeepEqual(tc.ExpectResourceRules, actualResourceRules) {
 			t.Logf("tc: %v -> attr %v", tc, attr)
@@ -451,7 +453,7 @@ func TestAuthorizeV1beta1(t *testing.T) {
 			Path:            tc.Path,
 		}
 		// t.Logf("tc %2v: %v -> attr %v", i, tc, attr)
-		decision, _, _ := a.Authorize(attr)
+		decision, _, _ := a.Authorize(context.Background(), attr)
 		if tc.ExpectDecision != decision {
 			t.Errorf("%d: Expected allowed=%v but actually allowed=%v, for case %+v & %+v",
 				i, tc.ExpectDecision, decision, tc, attr)

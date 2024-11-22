@@ -14,22 +14,26 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package e2e_node
+package e2enode
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	internalapi "k8s.io/cri-api/pkg/apis"
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
-	"k8s.io/kubernetes/pkg/kubelet/types"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/kubelet/pkg/types"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	"k8s.io/kubernetes/test/e2e/nodefeature"
+	admissionapi "k8s.io/pod-security-admission/api"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
+	"github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
 )
 
 const (
@@ -69,8 +73,9 @@ type testRun struct {
 
 // GarbageCollect tests that the Kubelet conforms to the Kubelet Garbage Collection Policy, found here:
 // http://kubernetes.io/docs/admin/garbage-collection/
-var _ = framework.KubeDescribe("GarbageCollect [Serial][NodeFeature:GarbageCollect]", func() {
+var _ = SIGDescribe("GarbageCollect", framework.WithSerial(), nodefeature.GarbageCollect, func() {
 	f := framework.NewDefaultFramework("garbage-collect-test")
+	f.NamespacePodSecurityLevel = admissionapi.LevelPrivileged
 	containerNamePrefix := "gc-test-container-"
 	podNamePrefix := "gc-test-pod-"
 
@@ -78,16 +83,16 @@ var _ = framework.KubeDescribe("GarbageCollect [Serial][NodeFeature:GarbageColle
 	// They differentiate pods from one another, and allow filtering
 	// by names to identify which containers belong to which pods
 	// They must be unique, and must not end in a number
-	first_suffix := "one-container-no-restarts"
-	second_suffix := "many-containers-many-restarts-one-pod"
-	third_suffix := "many-containers-many-restarts-"
+	firstSuffix := "one-container-no-restarts"
+	secondSuffix := "many-containers-many-restarts-one-pod"
+	thirdSuffix := "many-containers-many-restarts-"
 	tests := []testRun{
 		{
 			testName: "One Non-restarting Container",
 			testPods: []*testPodSpec{
 				{
-					podName:         podNamePrefix + first_suffix,
-					containerPrefix: containerNamePrefix + first_suffix,
+					podName:         podNamePrefix + firstSuffix,
+					containerPrefix: containerNamePrefix + firstSuffix,
 					restartCount:    0,
 					numContainers:   1,
 				},
@@ -97,8 +102,8 @@ var _ = framework.KubeDescribe("GarbageCollect [Serial][NodeFeature:GarbageColle
 			testName: "Many Restarting Containers",
 			testPods: []*testPodSpec{
 				{
-					podName:         podNamePrefix + second_suffix,
-					containerPrefix: containerNamePrefix + second_suffix,
+					podName:         podNamePrefix + secondSuffix,
+					containerPrefix: containerNamePrefix + secondSuffix,
 					restartCount:    4,
 					numContainers:   4,
 				},
@@ -108,20 +113,20 @@ var _ = framework.KubeDescribe("GarbageCollect [Serial][NodeFeature:GarbageColle
 			testName: "Many Pods with Many Restarting Containers",
 			testPods: []*testPodSpec{
 				{
-					podName:         podNamePrefix + third_suffix + "one",
-					containerPrefix: containerNamePrefix + third_suffix + "one",
+					podName:         podNamePrefix + thirdSuffix + "one",
+					containerPrefix: containerNamePrefix + thirdSuffix + "one",
 					restartCount:    3,
 					numContainers:   4,
 				},
 				{
-					podName:         podNamePrefix + third_suffix + "two",
-					containerPrefix: containerNamePrefix + third_suffix + "two",
+					podName:         podNamePrefix + thirdSuffix + "two",
+					containerPrefix: containerNamePrefix + thirdSuffix + "two",
 					restartCount:    2,
 					numContainers:   6,
 				},
 				{
-					podName:         podNamePrefix + third_suffix + "three",
-					containerPrefix: containerNamePrefix + third_suffix + "three",
+					podName:         podNamePrefix + thirdSuffix + "three",
+					containerPrefix: containerNamePrefix + thirdSuffix + "three",
 					restartCount:    3,
 					numContainers:   5,
 				},
@@ -134,23 +139,24 @@ var _ = framework.KubeDescribe("GarbageCollect [Serial][NodeFeature:GarbageColle
 })
 
 // Tests the following:
-// 	pods are created, and all containers restart the specified number of times
-// 	while containers are running, the number of copies of a single container does not exceed maxPerPodContainer
-// 	while containers are running, the total number of containers does not exceed maxTotalContainers
-// 	while containers are running, if not constrained by maxPerPodContainer or maxTotalContainers, keep an extra copy of each container
-// 	once pods are killed, all containers are eventually cleaned up
+//
+//	pods are created, and all containers restart the specified number of times
+//	while containers are running, the number of copies of a single container does not exceed maxPerPodContainer
+//	while containers are running, the total number of containers does not exceed maxTotalContainers
+//	while containers are running, if not constrained by maxPerPodContainer or maxTotalContainers, keep an extra copy of each container
+//	once pods are killed, all containers are eventually cleaned up
 func containerGCTest(f *framework.Framework, test testRun) {
 	var runtime internalapi.RuntimeService
-	BeforeEach(func() {
+	ginkgo.BeforeEach(func() {
 		var err error
 		runtime, _, err = getCRIClient()
-		Expect(err).NotTo(HaveOccurred())
+		framework.ExpectNoError(err)
 	})
 	for _, pod := range test.testPods {
 		// Initialize the getContainerNames function to use CRI runtime client.
 		pod.getContainerNames = func() ([]string, error) {
 			relevantContainers := []string{}
-			containers, err := runtime.ListContainers(&runtimeapi.ContainerFilter{
+			containers, err := runtime.ListContainers(context.Background(), &runtimeapi.ContainerFilter{
 				LabelSelector: map[string]string{
 					types.KubernetesPodNameLabel:      pod.podName,
 					types.KubernetesPodNamespaceLabel: f.Namespace.Name,
@@ -166,28 +172,28 @@ func containerGCTest(f *framework.Framework, test testRun) {
 		}
 	}
 
-	Context(fmt.Sprintf("Garbage Collection Test: %s", test.testName), func() {
-		BeforeEach(func() {
+	ginkgo.Context(fmt.Sprintf("Garbage Collection Test: %s", test.testName), func() {
+		ginkgo.BeforeEach(func(ctx context.Context) {
 			realPods := getPods(test.testPods)
-			f.PodClient().CreateBatch(realPods)
-			By("Making sure all containers restart the specified number of times")
-			Eventually(func() error {
+			e2epod.NewPodClient(f).CreateBatch(ctx, realPods)
+			ginkgo.By("Making sure all containers restart the specified number of times")
+			gomega.Eventually(ctx, func(ctx context.Context) error {
 				for _, podSpec := range test.testPods {
-					err := verifyPodRestartCount(f, podSpec.podName, podSpec.numContainers, podSpec.restartCount)
+					err := verifyPodRestartCount(ctx, f, podSpec.podName, podSpec.numContainers, podSpec.restartCount)
 					if err != nil {
 						return err
 					}
 				}
 				return nil
-			}, setupDuration, runtimePollInterval).Should(BeNil())
+			}, setupDuration, runtimePollInterval).Should(gomega.BeNil())
 		})
 
-		It(fmt.Sprintf("Should eventually garbage collect containers when we exceed the number of dead containers per container"), func() {
+		ginkgo.It("Should eventually garbage collect containers when we exceed the number of dead containers per container", func(ctx context.Context) {
 			totalContainers := 0
 			for _, pod := range test.testPods {
 				totalContainers += pod.numContainers*2 + 1
 			}
-			Eventually(func() error {
+			gomega.Eventually(ctx, func() error {
 				total := 0
 				for _, pod := range test.testPods {
 					containerNames, err := pod.getContainerNames()
@@ -214,11 +220,11 @@ func containerGCTest(f *framework.Framework, test testRun) {
 					return fmt.Errorf("expected total number of containers: %v, to be <= maxTotalContainers: %v", total, maxTotalContainers)
 				}
 				return nil
-			}, garbageCollectDuration, runtimePollInterval).Should(BeNil())
+			}, garbageCollectDuration, runtimePollInterval).Should(gomega.BeNil())
 
 			if maxPerPodContainer >= 2 && maxTotalContainers < 0 { // make sure constraints wouldn't make us gc old containers
-				By("Making sure the kubelet consistently keeps around an extra copy of each container.")
-				Consistently(func() error {
+				ginkgo.By("Making sure the kubelet consistently keeps around an extra copy of each container.")
+				gomega.Consistently(ctx, func() error {
 					for _, pod := range test.testPods {
 						containerNames, err := pod.getContainerNames()
 						if err != nil {
@@ -237,18 +243,18 @@ func containerGCTest(f *framework.Framework, test testRun) {
 						}
 					}
 					return nil
-				}, garbageCollectDuration, runtimePollInterval).Should(BeNil())
+				}, garbageCollectDuration, runtimePollInterval).Should(gomega.BeNil())
 			}
 		})
 
-		AfterEach(func() {
+		ginkgo.AfterEach(func(ctx context.Context) {
 			for _, pod := range test.testPods {
-				By(fmt.Sprintf("Deleting Pod %v", pod.podName))
-				f.PodClient().DeleteSync(pod.podName, &metav1.DeleteOptions{}, framework.DefaultPodDeletionTimeout)
+				ginkgo.By(fmt.Sprintf("Deleting Pod %v", pod.podName))
+				e2epod.NewPodClient(f).DeleteSync(ctx, pod.podName, metav1.DeleteOptions{}, e2epod.DefaultPodDeletionTimeout)
 			}
 
-			By("Making sure all containers get cleaned up")
-			Eventually(func() error {
+			ginkgo.By("Making sure all containers get cleaned up")
+			gomega.Eventually(ctx, func() error {
 				for _, pod := range test.testPods {
 					containerNames, err := pod.getContainerNames()
 					if err != nil {
@@ -259,11 +265,11 @@ func containerGCTest(f *framework.Framework, test testRun) {
 					}
 				}
 				return nil
-			}, garbageCollectDuration, runtimePollInterval).Should(BeNil())
+			}, garbageCollectDuration, runtimePollInterval).Should(gomega.BeNil())
 
-			if CurrentGinkgoTestDescription().Failed && framework.TestContext.DumpLogsOnFailure {
-				logNodeEvents(f)
-				logPodEvents(f)
+			if ginkgo.CurrentSpecReport().Failed() && framework.TestContext.DumpLogsOnFailure {
+				logNodeEvents(ctx, f)
+				logPodEvents(ctx, f)
 			}
 		})
 	})
@@ -271,7 +277,7 @@ func containerGCTest(f *framework.Framework, test testRun) {
 
 func getPods(specs []*testPodSpec) (pods []*v1.Pod) {
 	for _, spec := range specs {
-		By(fmt.Sprintf("Creating %v containers with restartCount: %v", spec.numContainers, spec.restartCount))
+		ginkgo.By(fmt.Sprintf("Creating %v containers with restartCount: %v", spec.numContainers, spec.restartCount))
 		containers := []v1.Container{}
 		for i := 0; i < spec.numContainers; i++ {
 			containers = append(containers, v1.Container{
@@ -312,8 +318,8 @@ func getRestartingContainerCommand(path string, containerNum int, restarts int32
 	}
 }
 
-func verifyPodRestartCount(f *framework.Framework, podName string, expectedNumContainers int, expectedRestartCount int32) error {
-	updatedPod, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Get(podName, metav1.GetOptions{})
+func verifyPodRestartCount(ctx context.Context, f *framework.Framework, podName string, expectedNumContainers int, expectedRestartCount int32) error {
+	updatedPod, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}

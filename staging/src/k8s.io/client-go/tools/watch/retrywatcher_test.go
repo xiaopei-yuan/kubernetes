@@ -26,17 +26,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
+	"github.com/google/go-cmp/cmp"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/diff"
+	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 func init() {
@@ -289,6 +289,42 @@ func TestRetryWatcher(t *testing.T) {
 			},
 		},
 		{
+			name:      "fails on Forbidden",
+			initialRV: "5",
+			watchClient: &cache.ListWatch{
+				WatchFunc: func() func(options metav1.ListOptions) (watch.Interface, error) {
+					return func(options metav1.ListOptions) (watch.Interface, error) {
+						return nil, apierrors.NewForbidden(schema.GroupResource{}, "", errors.New("unknown"))
+					}
+				}(),
+			},
+			watchCount: 1,
+			expected: []watch.Event{
+				{
+					Type:   watch.Error,
+					Object: &apierrors.NewForbidden(schema.GroupResource{}, "", errors.New("unknown")).ErrStatus,
+				},
+			},
+		},
+		{
+			name:      "fails on Unauthorized",
+			initialRV: "5",
+			watchClient: &cache.ListWatch{
+				WatchFunc: func() func(options metav1.ListOptions) (watch.Interface, error) {
+					return func(options metav1.ListOptions) (watch.Interface, error) {
+						return nil, apierrors.NewUnauthorized("")
+					}
+				}(),
+			},
+			watchCount: 1,
+			expected: []watch.Event{
+				{
+					Type:   watch.Error,
+					Object: &apierrors.NewUnauthorized("").ErrStatus,
+				},
+			},
+		},
+		{
 			name:      "recovers from timeout error",
 			initialRV: "5",
 			watchClient: &cache.ListWatch{
@@ -530,7 +566,7 @@ func TestRetryWatcher(t *testing.T) {
 			for i := 0; i < len(tc.expected); i++ {
 				event, ok := <-watcher.ResultChan()
 				if !ok {
-					t.Error(spew.Errorf("expected event %#+v, but channel is closed"), tc.expected[i])
+					t.Errorf("expected event %s, but channel is closed", dump.Pretty(tc.expected[i]))
 					break
 				}
 
@@ -544,7 +580,7 @@ func TestRetryWatcher(t *testing.T) {
 			select {
 			case event, ok := <-watcher.ResultChan():
 				if ok {
-					t.Error(spew.Errorf("Unexpected event received after reading all the expected ones: %#+v", event))
+					t.Errorf("Unexpected event received after reading all the expected ones: %s", dump.Pretty(event))
 				}
 			case <-time.After(10 * time.Millisecond):
 				break
@@ -564,7 +600,7 @@ func TestRetryWatcher(t *testing.T) {
 			}
 
 			if !reflect.DeepEqual(tc.expected, got) {
-				t.Fatal(spew.Errorf("expected %#+v, got %#+v;\ndiff: %s", tc.expected, got, diff.ObjectReflectDiff(tc.expected, got)))
+				t.Fatalf("expected %s, got %s;\ndiff: %s", dump.Pretty(tc.expected), dump.Pretty(got), cmp.Diff(tc.expected, got))
 			}
 		})
 	}
@@ -586,12 +622,15 @@ func TestRetryWatcherToFinishWithUnreadEvents(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	watcher.Stop()
+	// Verify a second stop does not cause a panic
+	watcher.Stop()
 
+	maxTime := time.Second
 	select {
 	case <-watcher.Done():
 		break
-	case <-time.After(10 * time.Millisecond):
-		t.Error("Failed to close the watcher")
+	case <-time.After(maxTime):
+		t.Errorf("The watcher failed to be closed in %s", maxTime)
 	}
 
 	// RetryWatcher result channel should be closed

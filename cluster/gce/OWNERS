@@ -3,20 +3,25 @@
 reviewers:
   - bowei
   - cjcullen
-  - gmarek
-  - jszczepkowski
-  - vishh
   - mwielgus
-  - MaciekPytel
-  - jingax10
   - yujuhong
+  - mtaufen
+  - ibabou
+  - sig-scalability-reviewers
 approvers:
   - bowei
   - cjcullen
+  - mwielgus
+  - yujuhong
+  - mtaufen
+  - ibabou
+  - sig-scalability-approvers
+emeritus_approvers:
   - gmarek
+  - jingax10
   - jszczepkowski
   - vishh
-  - mwielgus
   - MaciekPytel
-  - jingax10
-  - yujuhong
+labels:
+  - sig/cloud-provider
+  - area/provider/gcp

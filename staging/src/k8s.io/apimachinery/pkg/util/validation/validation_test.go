@@ -323,35 +323,298 @@ func TestIsValidLabelValue(t *testing.T) {
 }
 
 func TestIsValidIP(t *testing.T) {
-	goodValues := []string{
-		"::1",
-		"2a00:79e0:2:0:f1c3:e797:93c1:df80",
-		"::",
-		"2001:4860:4860::8888",
-		"::fff:1.1.1.1",
-		"1.1.1.1",
-		"1.1.1.01",
-		"255.0.0.1",
-		"1.0.0.0",
-		"0.0.0.0",
-	}
-	for _, val := range goodValues {
-		if msgs := IsValidIP(val); len(msgs) != 0 {
-			t.Errorf("expected true for %q: %v", val, msgs)
-		}
-	}
+	for _, tc := range []struct {
+		name   string
+		in     string
+		family int
+		err    string
+	}{
+		// GOOD VALUES
+		{
+			name:   "ipv4",
+			in:     "1.2.3.4",
+			family: 4,
+		},
+		{
+			name:   "ipv4, all zeros",
+			in:     "0.0.0.0",
+			family: 4,
+		},
+		{
+			name:   "ipv4, max",
+			in:     "255.255.255.255",
+			family: 4,
+		},
+		{
+			name:   "ipv6",
+			in:     "1234::abcd",
+			family: 6,
+		},
+		{
+			name:   "ipv6, all zeros, collapsed",
+			in:     "::",
+			family: 6,
+		},
+		{
+			name:   "ipv6, max",
+			in:     "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+			family: 6,
+		},
 
-	badValues := []string{
-		"[2001:db8:0:1]:80",
-		"myhost.mydomain",
-		"-1.0.0.0",
-		"[2001:db8:0:1]",
-		"a",
+		// GOOD, THOUGH NON-CANONICAL, VALUES
+		{
+			name:   "ipv6, all zeros, expanded (non-canonical)",
+			in:     "0:0:0:0:0:0:0:0",
+			family: 6,
+		},
+		{
+			name:   "ipv6, leading 0s (non-canonical)",
+			in:     "0001:002:03:4::",
+			family: 6,
+		},
+		{
+			name:   "ipv6, capital letters (non-canonical)",
+			in:     "1234::ABCD",
+			family: 6,
+		},
+
+		// BAD VALUES WE CURRENTLY CONSIDER GOOD
+		{
+			name:   "ipv4 with leading 0s",
+			in:     "1.1.1.01",
+			family: 4,
+		},
+		{
+			name:   "ipv4-in-ipv6 value",
+			in:     "::ffff:1.1.1.1",
+			family: 4,
+		},
+
+		// BAD VALUES
+		{
+			name: "empty string",
+			in:   "",
+			err:  "must be a valid IP address",
+		},
+		{
+			name: "junk",
+			in:   "aaaaaaa",
+			err:  "must be a valid IP address",
+		},
+		{
+			name: "domain name",
+			in:   "myhost.mydomain",
+			err:  "must be a valid IP address",
+		},
+		{
+			name: "cidr",
+			in:   "1.2.3.0/24",
+			err:  "must be a valid IP address",
+		},
+		{
+			name: "ipv4 with out-of-range octets",
+			in:   "1.2.3.400",
+			err:  "must be a valid IP address",
+		},
+		{
+			name: "ipv4 with negative octets",
+			in:   "-1.0.0.0",
+			err:  "must be a valid IP address",
+		},
+		{
+			name: "ipv6 with out-of-range segment",
+			in:   "2001:db8::10005",
+			err:  "must be a valid IP address",
+		},
+		{
+			name: "ipv4:port",
+			in:   "1.2.3.4:80",
+			err:  "must be a valid IP address",
+		},
+		{
+			name: "ipv6 with brackets",
+			in:   "[2001:db8::1]",
+			err:  "must be a valid IP address",
+		},
+		{
+			name: "[ipv6]:port",
+			in:   "[2001:db8::1]:80",
+			err:  "must be a valid IP address",
+		},
+		{
+			name: "host:port",
+			in:   "example.com:80",
+			err:  "must be a valid IP address",
+		},
+		{
+			name: "ipv6 with zone",
+			in:   "1234::abcd%eth0",
+			err:  "must be a valid IP address",
+		},
+		{
+			name: "ipv4 with zone",
+			in:   "169.254.0.0%eth0",
+			err:  "must be a valid IP address",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := IsValidIP(field.NewPath(""), tc.in)
+			if tc.err == "" {
+				if len(errs) != 0 {
+					t.Errorf("expected %q to be valid but got: %v", tc.in, errs)
+				}
+			} else {
+				if len(errs) != 1 {
+					t.Errorf("expected %q to have 1 error but got: %v", tc.in, errs)
+				} else if !strings.Contains(errs[0].Detail, tc.err) {
+					t.Errorf("expected error for %q to contain %q but got: %q", tc.in, tc.err, errs[0].Detail)
+				}
+			}
+
+			errs = IsValidIPv4Address(field.NewPath(""), tc.in)
+			if tc.family == 4 {
+				if len(errs) != 0 {
+					t.Errorf("expected %q to pass IsValidIPv4Address but got: %v", tc.in, errs)
+				}
+			} else {
+				if len(errs) == 0 {
+					t.Errorf("expected %q to fail IsValidIPv4Address", tc.in)
+				}
+			}
+
+			errs = IsValidIPv6Address(field.NewPath(""), tc.in)
+			if tc.family == 6 {
+				if len(errs) != 0 {
+					t.Errorf("expected %q to pass IsValidIPv6Address but got: %v", tc.in, errs)
+				}
+			} else {
+				if len(errs) == 0 {
+					t.Errorf("expected %q to fail IsValidIPv6Address", tc.in)
+				}
+			}
+		})
 	}
-	for _, val := range badValues {
-		if msgs := IsValidIP(val); len(msgs) == 0 {
-			t.Errorf("expected false for %q", val)
-		}
+}
+
+func TestIsValidCIDR(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		err  string
+	}{
+		// GOOD VALUES
+		{
+			name: "ipv4",
+			in:   "1.0.0.0/8",
+		},
+		{
+			name: "ipv4, all IPs",
+			in:   "0.0.0.0/0",
+		},
+		{
+			name: "ipv4, single IP",
+			in:   "1.1.1.1/32",
+		},
+		{
+			name: "ipv6",
+			in:   "2001:4860:4860::/48",
+		},
+		{
+			name: "ipv6, all IPs",
+			in:   "::/0",
+		},
+		{
+			name: "ipv6, single IP",
+			in:   "::1/128",
+		},
+
+		// GOOD, THOUGH NON-CANONICAL, VALUES
+		{
+			name: "ipv6, extra 0s (non-canonical)",
+			in:   "2a00:79e0:2:0::/64",
+		},
+		{
+			name: "ipv6, capital letters (non-canonical)",
+			in:   "2001:DB8::/64",
+		},
+
+		// BAD VALUES WE CURRENTLY CONSIDER GOOD
+		{
+			name: "ipv4 with leading 0s",
+			in:   "1.1.01.0/24",
+		},
+		{
+			name: "ipv4-in-ipv6 with ipv4-sized prefix",
+			in:   "::ffff:1.1.1.0/24",
+		},
+		{
+			name: "ipv4-in-ipv6 with ipv6-sized prefix",
+			in:   "::ffff:1.1.1.0/120",
+		},
+		{
+			name: "ipv4 with bits past prefix",
+			in:   "1.2.3.4/24",
+		},
+		{
+			name: "ipv6 with bits past prefix",
+			in:   "2001:db8::1/64",
+		},
+		{
+			name: "prefix length with leading 0s",
+			in:   "192.168.0.0/016",
+		},
+
+		// BAD VALUES
+		{
+			name: "empty string",
+			in:   "",
+			err:  "must be a valid CIDR value",
+		},
+		{
+			name: "junk",
+			in:   "aaaaaaa",
+			err:  "must be a valid CIDR value",
+		},
+		{
+			name: "IP address",
+			in:   "1.2.3.4",
+			err:  "must be a valid CIDR value",
+		},
+		{
+			name: "partial URL",
+			in:   "192.168.0.1/healthz",
+			err:  "must be a valid CIDR value",
+		},
+		{
+			name: "partial URL 2",
+			in:   "192.168.0.1/0/99",
+			err:  "must be a valid CIDR value",
+		},
+		{
+			name: "negative prefix length",
+			in:   "192.168.0.0/-16",
+			err:  "must be a valid CIDR value",
+		},
+		{
+			name: "prefix length with sign",
+			in:   "192.168.0.0/+16",
+			err:  "must be a valid CIDR value",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := IsValidCIDR(field.NewPath(""), tc.in)
+			if tc.err == "" {
+				if len(errs) != 0 {
+					t.Errorf("expected %q to be valid but got: %v", tc.in, errs)
+				}
+			} else {
+				if len(errs) != 1 {
+					t.Errorf("expected %q to have 1 error but got: %v", tc.in, errs)
+				} else if !strings.Contains(errs[0].Detail, tc.err) {
+					t.Errorf("expected error for %q to contain %q but got: %q", tc.in, tc.err, errs[0].Detail)
+				}
+			}
+		})
 	}
 }
 
@@ -477,29 +740,112 @@ func TestIsWildcardDNS1123Subdomain(t *testing.T) {
 	}
 }
 
+func TestIsFullyQualifiedDomainName(t *testing.T) {
+	goodValues := []string{
+		"a.com",
+		"k8s.io",
+		"dev.k8s.io",
+		"dev.k8s.io.",
+		"foo.example.com",
+		"this.is.a.really.long.fqdn",
+		"bbc.co.uk",
+		"10.0.0.1", // DNS labels can start with numbers and there is no requirement for letters.
+		"hyphens-are-good.k8s.io",
+		strings.Repeat("a", 63) + ".k8s.io",
+		strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 54) + ".k8s.io",
+	}
+	for _, val := range goodValues {
+		if err := IsFullyQualifiedDomainName(field.NewPath(""), val).ToAggregate(); err != nil {
+			t.Errorf("expected no errors for %q: %v", val, err)
+		}
+	}
+
+	badValues := []string{
+		".",
+		"...",
+		".io",
+		"com",
+		".com",
+		"Dev.k8s.io",
+		".foo.example.com",
+		"*.example.com",
+		"*.bar.com",
+		"*.foo.bar.com",
+		"underscores_are_bad.k8s.io",
+		"foo@bar.example.com",
+		"http://foo.example.com",
+		strings.Repeat("a", 64) + ".k8s.io",
+		strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 55) + ".k8s.io",
+	}
+	for _, val := range badValues {
+		if err := IsFullyQualifiedDomainName(field.NewPath(""), val).ToAggregate(); err == nil {
+			t.Errorf("expected errors for %q", val)
+		}
+	}
+}
+
 func TestIsFullyQualifiedName(t *testing.T) {
-	tests := []struct {
+	goodValues := []string{
+		"dev.k8s.io",
+		"foo.example.com",
+		"this.is.a.really.long.fqdn",
+		"bbc.co.uk",
+		"10.0.0.1", // DNS labels can start with numbers and there is no requirement for letters.
+		"hyphens-are-good.k8s.io",
+		strings.Repeat("a", 246) + ".k8s.io",
+	}
+	for _, val := range goodValues {
+		if err := IsFullyQualifiedName(field.NewPath(""), val).ToAggregate(); err != nil {
+			t.Errorf("expected no errors for %q: %v", val, err)
+		}
+	}
+
+	badValues := []string{
+		"...",
+		"dev.k8s.io.",
+		".io",
+		"Dev.k8s.io",
+		"k8s.io",
+		"*.example.com",
+		"*.bar.com",
+		"*.foo.bar.com",
+		"underscores_are_bad.k8s.io",
+		"foo@bar.example.com",
+		"http://foo.example.com",
+		strings.Repeat("a", 247) + ".k8s.io",
+	}
+	for _, val := range badValues {
+		if err := IsFullyQualifiedName(field.NewPath(""), val).ToAggregate(); err == nil {
+			t.Errorf("expected errors for %q", val)
+		}
+	}
+
+	messageTests := []struct {
 		name       string
 		targetName string
 		err        string
-	}{
-		{
-			name:       "name needs to be fully qualified, i.e., contains at least 2 dots",
-			targetName: "k8s.io",
-			err:        "should be a domain with at least three segments separated by dots",
-		},
-		{
-			name:       "name cannot be empty",
-			targetName: "",
-			err:        "Required value",
-		},
-		{
-			name:       "name must conform to RFC 1123",
-			targetName: "A.B.C",
-			err:        "a DNS-1123 subdomain must consist of lower case alphanumeric characters",
-		},
-	}
-	for _, tc := range tests {
+	}{{
+		name:       "name needs to be fully qualified, i.e., contains at least 2 dots",
+		targetName: "k8s.io",
+		err:        "should be a domain with at least three segments separated by dots",
+	}, {
+		name:       "name should not include scheme",
+		targetName: "http://foo.k8s.io",
+		err:        "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
+	}, {
+		name:       "email should be invalid",
+		targetName: "example@foo.k8s.io",
+		err:        "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
+	}, {
+		name:       "name cannot be empty",
+		targetName: "",
+		err:        "Required value",
+	}, {
+		name:       "name must conform to RFC 1123",
+		targetName: "A.B.C",
+		err:        "a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters",
+	}}
+	for _, tc := range messageTests {
 		err := IsFullyQualifiedName(field.NewPath(""), tc.targetName).ToAggregate()
 		switch {
 		case tc.err == "" && err != nil:
@@ -512,30 +858,76 @@ func TestIsFullyQualifiedName(t *testing.T) {
 	}
 }
 
-func TestIsValidSocketAddr(t *testing.T) {
+func TestIsDomainPrefixedPath(t *testing.T) {
 	goodValues := []string{
-		"0.0.0.0:10254",
-		"127.0.0.1:8888",
-		"[2001:db8:1f70::999:de8:7648:6e8]:10254",
-		"[::]:10254",
+		"a/b",
+		"a/b/c/d",
+		"a.com/foo",
+		"a.b.c.d/foo",
+		"k8s.io/foo/bar",
+		"k8s.io/FOO/BAR",
+		"dev.k8s.io/more/path",
+		"this.is.a.really.long.fqdn/even/longer/path/just/because",
+		"bbc.co.uk/path/goes/here",
+		"10.0.0.1/foo",
+		"hyphens-are-good.k8s.io/and-in-paths-too",
+		strings.Repeat("a", 240) + ".k8s.io/a",
+		"k8s.io/" + strings.Repeat("a", 240),
 	}
 	for _, val := range goodValues {
-		if errs := IsValidSocketAddr(val); len(errs) != 0 {
-			t.Errorf("expected no errors for %q: %v", val, errs)
+		if err := IsDomainPrefixedPath(field.NewPath(""), val).ToAggregate(); err != nil {
+			t.Errorf("expected no errors for %q: %v", val, err)
 		}
 	}
 
 	badValues := []string{
-		"0.0.0.0.0:2020",
-		"0.0.0.0",
-		"6.6.6.6:909090",
-		"2001:db8:1f70::999:de8:7648:6e8:87567:102545",
-		"",
-		"*",
+		".",
+		"...",
+		"/b",
+		"com",
+		".com",
+		"a.b.c.d/foo?a=b",
+		"a.b.c.d/foo#a",
+		"Dev.k8s.io",
+		".foo.example.com",
+		"*.example.com",
+		"example.com/foo{}[]@^`",
+		"underscores_are_bad.k8s.io",
+		"underscores_are_bad.k8s.io/foo",
+		"foo@bar.example.com",
+		"foo@bar.example.com/foo",
+		strings.Repeat("a", 247) + ".k8s.io",
 	}
 	for _, val := range badValues {
-		if errs := IsValidSocketAddr(val); len(errs) == 0 {
+		if err := IsDomainPrefixedPath(field.NewPath(""), val).ToAggregate(); err == nil {
 			t.Errorf("expected errors for %q", val)
+		}
+	}
+}
+
+func TestIsRelaxedEnvVarName(t *testing.T) {
+	goodValues := []string{
+		"-", ":", "_", "+a", ">a", "<a",
+		"a.", "a..", "*a", "%a", "?a",
+		"a:a", "a_a", "aAz", "~a", "|a",
+		"a0a", "a9", "/a", "a ", "#a",
+		"0a", "0 a", "'a", "(a", "@a",
+	}
+	for _, val := range goodValues {
+		if msgs := IsRelaxedEnvVarName(val); len(msgs) != 0 {
+			t.Errorf("expected true for '%s': %v", val, msgs)
+		}
+	}
+
+	badValues := []string{
+		"", "=", "a=", "1=a", "a=b", "#%=&&",
+		string(rune(1)) + "abc", string(rune(130)) + "abc",
+		"Ç ç", "Ä ä", "Ñ ñ", "Ø ø",
+	}
+
+	for _, val := range badValues {
+		if msgs := IsRelaxedEnvVarName(val); len(msgs) == 0 {
+			t.Errorf("expected false for '%s'", val)
 		}
 	}
 }

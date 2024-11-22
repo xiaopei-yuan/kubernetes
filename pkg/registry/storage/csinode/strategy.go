@@ -41,18 +41,23 @@ func (csiNodeStrategy) NamespaceScoped() bool {
 	return false
 }
 
-// ResetBeforeCreate clears the Status field which is not allowed to be set by end users on creation.
+// PrepareForCreate clears fields that are not allowed to be set on creation.
 func (csiNodeStrategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
 }
 
 func (csiNodeStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	csiNode := obj.(*storage.CSINode)
+	validateOptions := validation.CSINodeValidationOptions{
+		AllowLongNodeID: true,
+	}
 
-	errs := validation.ValidateCSINode(csiNode)
-	errs = append(errs, validation.ValidateCSINode(csiNode)...)
+	errs := validation.ValidateCSINode(csiNode, validateOptions)
 
 	return errs
 }
+
+// WarningsOnCreate returns warnings for the creation of the given object.
+func (csiNodeStrategy) WarningsOnCreate(ctx context.Context, obj runtime.Object) []string { return nil }
 
 // Canonicalize normalizes the object after validation.
 func (csiNodeStrategy) Canonicalize(obj runtime.Object) {
@@ -62,15 +67,24 @@ func (csiNodeStrategy) AllowCreateOnUpdate() bool {
 	return false
 }
 
-// PrepareForUpdate sets the Status fields which is not allowed to be set by an end user updating a CSINode
+// PrepareForUpdate sets the driver's Allocatable fields that are not allowed to be set by an end user updating a CSINode.
 func (csiNodeStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
 }
 
 func (csiNodeStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	newCSINodeObj := obj.(*storage.CSINode)
 	oldCSINodeObj := old.(*storage.CSINode)
-	errorList := validation.ValidateCSINode(newCSINodeObj)
-	return append(errorList, validation.ValidateCSINodeUpdate(newCSINodeObj, oldCSINodeObj)...)
+	validateOptions := validation.CSINodeValidationOptions{
+		AllowLongNodeID: true,
+	}
+
+	errorList := validation.ValidateCSINode(newCSINodeObj, validateOptions)
+	return append(errorList, validation.ValidateCSINodeUpdate(newCSINodeObj, oldCSINodeObj, validateOptions)...)
+}
+
+// WarningsOnUpdate returns warnings for the given update.
+func (csiNodeStrategy) WarningsOnUpdate(ctx context.Context, obj, old runtime.Object) []string {
+	return nil
 }
 
 func (csiNodeStrategy) AllowUnconditionalUpdate() bool {

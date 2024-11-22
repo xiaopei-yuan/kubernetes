@@ -19,6 +19,7 @@ package rest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -29,6 +30,10 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 )
 
+type CounterMetric interface {
+	Inc()
+}
+
 // LocationStreamer is a resource that streams the contents of a particular
 // location URL.
 type LocationStreamer struct {
@@ -38,6 +43,13 @@ type LocationStreamer struct {
 	Flush           bool
 	ResponseChecker HttpResponseChecker
 	RedirectChecker func(req *http.Request, via []*http.Request) error
+	// TLSVerificationErrorCounter is an optional value that will Inc every time a TLS error is encountered.  This can
+	// be wired a single prometheus counter instance to get counts overall.
+	TLSVerificationErrorCounter CounterMetric
+	// DeprecatedTLSVerificationErrorCounter is a temporary field used to rename
+	// the kube_apiserver_pod_logs_pods_logs_backend_tls_failure_total metric
+	// with a one release deprecation period in 1.27.0.
+	DeprecatedTLSVerificationErrorCounter CounterMetric
 }
 
 // a LocationStreamer must implement a rest.ResourceStreamer
@@ -61,17 +73,28 @@ func (s *LocationStreamer) InputStream(ctx context.Context, apiVersion, acceptHe
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
+
 	client := &http.Client{
 		Transport:     transport,
 		CheckRedirect: s.RedirectChecker,
 	}
 	req, err := http.NewRequest("GET", s.Location.String(), nil)
+	if err != nil {
+		return nil, false, "", fmt.Errorf("failed to construct request for %s, got %v", s.Location.String(), err)
+	}
 	// Pass the parent context down to the request to ensure that the resources
 	// will be release properly.
 	req = req.WithContext(ctx)
 
 	resp, err := client.Do(req)
 	if err != nil {
+		// TODO prefer segregate TLS errors more reliably, but we do want to increment a count
+		if strings.Contains(err.Error(), "x509:") && s.TLSVerificationErrorCounter != nil {
+			s.TLSVerificationErrorCounter.Inc()
+			if s.DeprecatedTLSVerificationErrorCounter != nil {
+				s.DeprecatedTLSVerificationErrorCounter.Inc()
+			}
+		}
 		return nil, false, "", err
 	}
 

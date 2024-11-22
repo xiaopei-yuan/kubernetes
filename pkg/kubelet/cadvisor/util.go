@@ -17,22 +17,27 @@ limitations under the License.
 package cadvisor
 
 import (
-	goruntime "runtime"
+	"strings"
 
 	cadvisorapi "github.com/google/cadvisor/info/v1"
 	cadvisorapi2 "github.com/google/cadvisor/info/v2"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
-	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
+	"k8s.io/kubernetes/pkg/features"
 )
 
 const (
+	// CrioSocketSuffix is the path to the CRI-O socket.
 	// Please keep this in sync with the one in:
-	// github.com/google/cadvisor/container/crio/client.go
-	CrioSocket = "/var/run/crio/crio.sock"
+	// github.com/google/cadvisor/tree/master/container/crio/client.go
+	// Note that however we only match on the suffix, as /var/run is often a
+	// symlink to /run, so the user can specify either path.
+	CrioSocketSuffix = "run/crio/crio.sock"
 )
 
+// CapacityFromMachineInfo returns the capacity of the resources from the machine info.
 func CapacityFromMachineInfo(info *cadvisorapi.MachineInfo) v1.ResourceList {
 	c := v1.ResourceList{
 		v1.ResourceCPU: *resource.NewMilliQuantity(
@@ -54,6 +59,7 @@ func CapacityFromMachineInfo(info *cadvisorapi.MachineInfo) v1.ResourceList {
 	return c
 }
 
+// EphemeralStorageCapacityFromFsInfo returns the capacity of the ephemeral storage from the FsInfo.
 func EphemeralStorageCapacityFromFsInfo(info cadvisorapi2.FsInfo) v1.ResourceList {
 	c := v1.ResourceList{
 		v1.ResourceEphemeralStorage: *resource.NewQuantity(
@@ -63,14 +69,17 @@ func EphemeralStorageCapacityFromFsInfo(info cadvisorapi2.FsInfo) v1.ResourceLis
 	return c
 }
 
-// CRI integrations should get container metrics via CRI. Docker
-// uses the built-in cadvisor to gather such metrics on Linux for
-// historical reasons.
-// cri-o relies on cadvisor as a temporary workaround. The code should
+// UsingLegacyCadvisorStats returns true if container stats are provided by cadvisor instead of through the CRI.
+// CRI integrations should get container metrics via CRI.
+// TODO: cri-o relies on cadvisor as a temporary workaround. The code should
 // be removed. Related issue:
 // https://github.com/kubernetes/kubernetes/issues/51798
-// UsingLegacyCadvisorStats returns true if container stats are provided by cadvisor instead of through the CRI
-func UsingLegacyCadvisorStats(runtime, runtimeEndpoint string) bool {
-	return (runtime == kubetypes.DockerContainerRuntime && goruntime.GOOS == "linux") ||
-		runtimeEndpoint == CrioSocket || runtimeEndpoint == "unix://"+CrioSocket
+func UsingLegacyCadvisorStats(runtimeEndpoint string) bool {
+	// If PodAndContainerStatsFromCRI feature is enabled, then assume the user
+	// wants to use CRI stats, as the aforementioned workaround isn't needed
+	// when this feature is enabled.
+	if utilfeature.DefaultFeatureGate.Enabled(features.PodAndContainerStatsFromCRI) {
+		return false
+	}
+	return strings.HasSuffix(runtimeEndpoint, CrioSocketSuffix)
 }
